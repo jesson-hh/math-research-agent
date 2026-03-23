@@ -362,6 +362,126 @@ async def edit_note(request: Request):
     )
 
 
+@app.post("/api/design-experiment")
+async def design_experiment(request: Request):
+    """Design numerical/computational experiments based on research ideas or note. Streams SSE."""
+    body = await request.json()
+    ideas = body.get("ideas", "")
+    note_latex = body.get("note_latex", "")
+    instruction = body.get("instruction", "")
+
+    system = (
+        "You are an expert in designing computational and numerical experiments for mathematical research. "
+        "Based on the provided research ideas and/or LaTeX note, design concrete, executable experiments.\n\n"
+        "For each experiment, provide:\n"
+        "1. **Experiment Title**\n"
+        "2. **Objective** — What are we trying to verify or explore?\n"
+        "3. **Hypothesis** — What do we expect to find?\n"
+        "4. **Method** — Step-by-step procedure (algorithms, computations)\n"
+        "5. **Parameters & Data** — Specific ranges, sample sizes, inputs\n"
+        "6. **Expected Results** — What plots, tables, or metrics to produce\n"
+        "7. **Success Criteria** — How to judge if the experiment succeeded\n\n"
+        "Be specific and practical. Use concrete numbers and ranges. "
+        "These experiments should be implementable in Python using numpy, scipy, matplotlib, sympy. "
+        "Use LaTeX notation ($...$) for mathematical expressions."
+    )
+
+    user_msg = ""
+    if ideas:
+        user_msg += f"## Research Ideas\n\n{ideas}\n\n"
+    if note_latex:
+        user_msg += f"## Research Note (LaTeX)\n\n{note_latex[:3000]}\n\n"
+    if instruction:
+        user_msg += f"## Additional Instructions\n\n{instruction}\n\n"
+    if not user_msg:
+        user_msg = "Design a sample experiment for exploring prime number distribution."
+
+    messages = [{"role": "user", "content": user_msg}]
+
+    def event_stream():
+        client = get_client()
+        result_holder = {}
+        for partial_text in client.stream_chat(
+            system=system, messages=messages, max_tokens=4096, result_holder=result_holder,
+        ):
+            if partial_text:
+                yield f"data: {json.dumps({'type': 'text', 'content': partial_text}, ensure_ascii=False)}\n\n"
+        final_text = ""
+        for block in result_holder.get("blocks", []):
+            if block.get("type") == "text":
+                final_text += block["text"]
+        yield f"data: {json.dumps({'type': 'done', 'content': final_text}, ensure_ascii=False)}\n\n"
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.post("/api/generate-code-plan")
+async def generate_code_plan(request: Request):
+    """Generate executable Python code for experiments. Streams SSE."""
+    body = await request.json()
+    experiment_plan = body.get("experiment_plan", "")
+    note_latex = body.get("note_latex", "")
+    instruction = body.get("instruction", "")
+
+    system = (
+        "You are an expert Python scientific computing developer. "
+        "Based on the provided experiment plan, generate complete, executable Python code.\n\n"
+        "Requirements:\n"
+        "1. Start with a requirements section: list all pip packages needed\n"
+        "2. Write well-structured, documented Python code\n"
+        "3. Use numpy, scipy, matplotlib, sympy as primary libraries\n"
+        "4. Include data visualization (matplotlib plots with labels, titles, legends)\n"
+        "5. Include progress output (print statements for intermediate results)\n"
+        "6. Handle edge cases and add input validation where needed\n"
+        "7. Use functions and clear variable names\n"
+        "8. Add a `if __name__ == '__main__':` block\n\n"
+        "Format your output as:\n"
+        "### requirements.txt\n```\nnumpy\nscipy\n...\n```\n\n"
+        "### experiment.py\n```python\n# main experiment code\n```\n\n"
+        "### utils.py (if needed)\n```python\n# helper functions\n```\n\n"
+        "### README.md\n```\n# How to run\n...\n```\n\n"
+        "Make the code ready to run with `python experiment.py`."
+    )
+
+    user_msg = ""
+    if experiment_plan:
+        user_msg += f"## Experiment Plan\n\n{experiment_plan}\n\n"
+    if note_latex:
+        user_msg += f"## Research Context (LaTeX)\n\n{note_latex[:2000]}\n\n"
+    if instruction:
+        user_msg += f"## Additional Instructions\n\n{instruction}\n\n"
+    if not user_msg:
+        user_msg = "Generate a sample experiment script for exploring prime numbers."
+
+    messages = [{"role": "user", "content": user_msg}]
+
+    def event_stream():
+        client = get_client()
+        result_holder = {}
+        for partial_text in client.stream_chat(
+            system=system, messages=messages, max_tokens=8192, result_holder=result_holder,
+        ):
+            if partial_text:
+                yield f"data: {json.dumps({'type': 'text', 'content': partial_text}, ensure_ascii=False)}\n\n"
+        final_text = ""
+        for block in result_holder.get("blocks", []):
+            if block.get("type") == "text":
+                final_text += block["text"]
+        yield f"data: {json.dumps({'type': 'done', 'content': final_text}, ensure_ascii=False)}\n\n"
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 @app.post("/api/analyze-paper")
 async def analyze_paper(request: Request):
     """Generate a technical analysis report for a single paper. Streams SSE."""

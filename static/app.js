@@ -891,6 +891,7 @@ function downloadNetworkJSON() {
 
 let noteLatex = '';
 let noteChatHistory = [];
+let pendingNoteLatex = '';  // pending edit awaiting confirmation
 
 // Sync context from Discover tab when switching to Note Workshop
 function syncNoteContext() {
@@ -991,23 +992,24 @@ async function sendNoteEdit() {
   if (!noteLatex.trim()) { alert('Generate a note first'); return; }
 
   inputEl.value = '';
-  const messagesDiv = $('#note-chat-messages');
+  const chatMessages = $('#note-chat-messages');
 
   // User message
   const userDiv = document.createElement('div');
   userDiv.className = 'qa-msg user';
   userDiv.textContent = instruction;
-  messagesDiv.appendChild(userDiv);
+  chatMessages.appendChild(userDiv);
 
   // Assistant placeholder
   const assistantDiv = document.createElement('div');
   assistantDiv.className = 'qa-msg assistant';
   assistantDiv.innerHTML = '<span style="color:#888">Editing...</span>';
-  messagesDiv.appendChild(assistantDiv);
-  messagesDiv.scrollTop = messagesDiv.scrollHeight;
+  chatMessages.appendChild(assistantDiv);
+  chatMessages.scrollTop = chatMessages.scrollHeight;
 
   const btn = $('#btn-note-chat');
   btn.disabled = true;
+  pendingNoteLatex = '';
 
   try {
     const resp = await fetch('/api/edit-note', {
@@ -1022,30 +1024,81 @@ async function sendNoteEdit() {
 
     noteChatHistory.push({ role: 'user', content: instruction });
 
-    const editor = $('#note-editor');
     const fullText = await readSSE(resp,
       text => {
         let clean = text.replace(/^```(?:latex)?\n?/gm, '').replace(/\n?```$/gm, '');
-        editor.value = clean;
-        noteLatex = clean;
-        assistantDiv.innerHTML = '<span style="color:#10b981">Updated LaTeX source</span>';
+        pendingNoteLatex = clean;
+        assistantDiv.innerHTML = '<span style="color:#d97706">Changes ready — review and accept/reject</span>';
       },
       text => {
         let clean = text.replace(/^```(?:latex)?\n?/gm, '').replace(/\n?```$/gm, '');
-        editor.value = clean;
-        noteLatex = clean;
+        pendingNoteLatex = clean;
       }
     );
 
-    noteChatHistory.push({ role: 'assistant', content: 'Done. Updated the LaTeX source.' });
-    assistantDiv.innerHTML = '<span style="color:#10b981">Updated LaTeX source</span>';
+    noteChatHistory.push({ role: 'assistant', content: 'Proposed changes ready for review.' });
+
+    // Show pending preview in editor with visual indicator
+    const editor = $('#note-editor');
+    editor.value = pendingNoteLatex;
+    editor.classList.add('pending-edit');
+
+    // Show confirm bar
+    $('#note-confirm-bar').style.display = 'flex';
+
+    // Auto-preview the pending version
+    if ($('#note-preview-section').style.display !== 'none') {
+      $('#note-preview').innerHTML = renderLaTeXPreview(pendingNoteLatex);
+    }
+
+    assistantDiv.innerHTML = '<span style="color:#d97706">Changes ready — accept or reject below</span>';
   } catch (err) {
     assistantDiv.innerHTML = `<span style="color:#f66">Error: ${err.message}</span>`;
   }
 
   btn.disabled = false;
-  inputEl.focus();
-  messagesDiv.scrollTop = messagesDiv.scrollHeight;
+  chatMessages.scrollTop = chatMessages.scrollHeight;
+}
+
+function acceptNoteEdit() {
+  if (!pendingNoteLatex) return;
+  noteLatex = pendingNoteLatex;
+  pendingNoteLatex = '';
+  $('#note-editor').classList.remove('pending-edit');
+  $('#note-confirm-bar').style.display = 'none';
+
+  // Add confirmation to chat
+  const chatMessages = $('#note-chat-messages');
+  const div = document.createElement('div');
+  div.className = 'qa-msg assistant';
+  div.innerHTML = '<span style="color:#10b981">Changes accepted</span>';
+  chatMessages.appendChild(div);
+  chatMessages.scrollTop = chatMessages.scrollHeight;
+
+  // Refresh preview if visible
+  if ($('#note-preview-section').style.display !== 'none') {
+    previewNote();
+  }
+}
+
+function rejectNoteEdit() {
+  pendingNoteLatex = '';
+  $('#note-editor').value = noteLatex;  // restore original
+  $('#note-editor').classList.remove('pending-edit');
+  $('#note-confirm-bar').style.display = 'none';
+
+  // Add rejection to chat
+  const chatMessages = $('#note-chat-messages');
+  const div = document.createElement('div');
+  div.className = 'qa-msg assistant';
+  div.innerHTML = '<span style="color:#ef4444">Changes rejected — reverted to previous version</span>';
+  chatMessages.appendChild(div);
+  chatMessages.scrollTop = chatMessages.scrollHeight;
+
+  // Restore preview
+  if ($('#note-preview-section').style.display !== 'none') {
+    previewNote();
+  }
 }
 
 $('#note-chat-input').addEventListener('keydown', e => {
@@ -1060,8 +1113,64 @@ function previewNote() {
   const previewDiv = $('#note-preview');
   previewSection.style.display = 'block';
   previewDiv.innerHTML = renderLaTeXPreview(latex);
+
+  // Attach click handlers for preview→source navigation
+  previewDiv.querySelectorAll('.latex-nav').forEach(el => {
+    el.style.cursor = 'pointer';
+    el.title = 'Click to jump to source';
+    el.addEventListener('click', () => {
+      const searchText = el.dataset.search;
+      if (!searchText) return;
+      const editor = $('#note-editor');
+      const src = editor.value;
+      // Find the raw section command in source
+      const re = new RegExp(searchText.replace(/\\\\/g, '\\'));
+      const match = re.exec(src);
+      if (match) {
+        editor.focus();
+        editor.setSelectionRange(match.index, match.index + match[0].length);
+        // Scroll to selection
+        const linesBefore = src.substring(0, match.index).split('\n').length;
+        const lineHeight = 19; // approximate
+        editor.scrollTop = Math.max(0, (linesBefore - 3) * lineHeight);
+      }
+    });
+  });
+
   previewSection.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
+
+// Source→Preview navigation: Ctrl+Click on section in editor jumps to preview
+$('#note-editor').addEventListener('dblclick', function() {
+  const editor = this;
+  const pos = editor.selectionStart;
+  const text = editor.value;
+
+  // Find the line at cursor
+  const lineStart = text.lastIndexOf('\n', pos - 1) + 1;
+  const lineEnd = text.indexOf('\n', pos);
+  const line = text.substring(lineStart, lineEnd >= 0 ? lineEnd : text.length);
+
+  // Check if it's a section/subsection line
+  const secMatch = line.match(/\\(sub)?section\*?\{([^}]*)\}/);
+  if (!secMatch) return;
+
+  const sectionTitle = secMatch[2];
+  const previewDiv = $('#note-preview');
+  if (!previewDiv) return;
+
+  // Find matching heading in preview
+  const headings = previewDiv.querySelectorAll('.latex-nav');
+  for (const h of headings) {
+    if (h.textContent.trim().includes(sectionTitle.trim())) {
+      h.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      h.style.transition = 'background 0.3s';
+      h.style.background = 'rgba(102,126,234,0.15)';
+      setTimeout(() => { h.style.background = ''; }, 1500);
+      break;
+    }
+  }
+});
 
 function renderLaTeXPreview(latex) {
   let html = '';
@@ -1111,9 +1220,16 @@ function renderLaTeXPreview(latex) {
     }
   }
 
-  // Process sections
-  body = body.replace(/\\section\*?\{([^}]*)\}/g, (_, t) => `</p><h2>${renderLatexText(t)}</h2><p>`);
-  body = body.replace(/\\subsection\*?\{([^}]*)\}/g, (_, t) => `</p><h3>${renderLatexText(t)}</h3><p>`);
+  // Process sections — add data-src for source↔preview sync
+  let sectionCounter = 0;
+  body = body.replace(/\\section\*?\{([^}]*)\}/g, (match, t) => {
+    const id = `sec-${sectionCounter++}`;
+    return `</p><h2 class="latex-nav" data-search="\\\\section{${t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}}" data-id="${id}" id="pv-${id}">${renderLatexText(t)}</h2><p>`;
+  });
+  body = body.replace(/\\subsection\*?\{([^}]*)\}/g, (match, t) => {
+    const id = `sec-${sectionCounter++}`;
+    return `</p><h3 class="latex-nav" data-search="\\\\subsection{${t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}}" data-id="${id}" id="pv-${id}">${renderLatexText(t)}</h3><p>`;
+  });
 
   // Process theorem-like environments
   const envNames = ['theorem', 'lemma', 'proposition', 'corollary', 'definition', 'remark', 'proof'];
@@ -1215,6 +1331,182 @@ function downloadTeX() {
 // ════════════════════════════════════════
 // Reports Tab
 // ════════════════════════════════════════
+
+let lastExperimentPlan = '';
+let lastCodePlan = '';
+
+// Sync context from other tabs when switching to Reports
+function syncReportContext() {
+  const ideasEl = $('#report-ideas-preview');
+  if (ideasEl) {
+    const ideaContent = $('#idea-content');
+    if (ideaContent && ideaContent.textContent.trim()) {
+      ideasEl.innerHTML = `<div style="max-height:110px;overflow-y:auto;font-size:0.82rem;line-height:1.5">${ideaContent.innerHTML}</div>`;
+    } else {
+      ideasEl.innerHTML = '<p class="pool-empty">Generate ideas in Discover tab</p>';
+    }
+  }
+  const noteEl = $('#report-note-preview');
+  if (noteEl) {
+    if (noteLatex && noteLatex.trim()) {
+      const preview = noteLatex.length > 500 ? noteLatex.substring(0, 500) + '...' : noteLatex;
+      noteEl.innerHTML = `<pre style="max-height:110px;overflow-y:auto;font-size:0.75rem;white-space:pre-wrap;word-break:break-all;line-height:1.4">${escapeHtml(preview)}</pre>`;
+    } else {
+      noteEl.innerHTML = '<p class="pool-empty">Generate a note in Note Workshop</p>';
+    }
+  }
+}
+
+// Hook tab switching for Reports
+$$('.tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    if (tab.dataset.tab === 'reports') {
+      setTimeout(syncReportContext, 50);
+    }
+  });
+});
+
+async function designExperiment() {
+  const instruction = $('#exp-instruction').value.trim();
+  const ideasText = $('#idea-content') ? $('#idea-content').textContent.trim() : '';
+
+  if (!ideasText && !noteLatex && !instruction) {
+    alert('Generate ideas or a note first, or enter instructions.');
+    return;
+  }
+
+  const btn = $('#btn-design-exp');
+  btn.disabled = true;
+  btn.textContent = 'Designing...';
+  const output = $('#experiment-plan-output');
+  output.style.display = 'block';
+  output.innerHTML = '<p style="color:#888">Designing experiments...</p>';
+
+  try {
+    const resp = await fetch('/api/design-experiment', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ideas: ideasText,
+        note_latex: noteLatex,
+        instruction: instruction,
+      }),
+    });
+
+    const fullText = await readSSE(resp,
+      text => { output.innerHTML = renderMarkdown(text); },
+      text => { output.innerHTML = renderMarkdown(text); }
+    );
+    lastExperimentPlan = fullText;
+    $('#btn-gen-code').disabled = false;
+  } catch (err) {
+    output.innerHTML = `<p style="color:#ef4444">Error: ${err.message}</p>`;
+  }
+  btn.disabled = false;
+  btn.textContent = 'Design';
+}
+
+$('#exp-instruction').addEventListener('keydown', e => {
+  if (e.key === 'Enter') { e.preventDefault(); designExperiment(); }
+});
+
+async function generateCodePlan() {
+  if (!lastExperimentPlan) { alert('Design an experiment first'); return; }
+
+  const instruction = $('#code-instruction').value.trim();
+  const btn = $('#btn-gen-code');
+  btn.disabled = true;
+  btn.textContent = 'Generating...';
+
+  const outputDiv = $('#code-plan-output');
+  const contentDiv = $('#code-plan-content');
+  outputDiv.style.display = 'block';
+  contentDiv.innerHTML = '<p style="color:#888">Generating code...</p>';
+
+  try {
+    const resp = await fetch('/api/generate-code-plan', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        experiment_plan: lastExperimentPlan,
+        note_latex: noteLatex,
+        instruction: instruction,
+      }),
+    });
+
+    const fullText = await readSSE(resp,
+      text => { contentDiv.innerHTML = renderMarkdown(text); },
+      text => { contentDiv.innerHTML = renderMarkdown(text); }
+    );
+    lastCodePlan = fullText;
+    $('#btn-download-py').disabled = false;
+    $('#btn-download-all').disabled = false;
+  } catch (err) {
+    contentDiv.innerHTML = `<p style="color:#ef4444">Error: ${err.message}</p>`;
+  }
+  btn.disabled = false;
+  btn.textContent = 'Generate Code';
+}
+
+$('#code-instruction').addEventListener('keydown', e => {
+  if (e.key === 'Enter') { e.preventDefault(); generateCodePlan(); }
+});
+
+function extractCodeBlocks(text) {
+  const blocks = [];
+  // Match ### filename followed by ```lang ... ```
+  const re = /###\s+(\S+)\s*\n```[\w]*\n([\s\S]*?)```/g;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    blocks.push({ filename: m[1], content: m[2].trim() });
+  }
+  // Fallback: if no ### headers, extract all code blocks
+  if (!blocks.length) {
+    const fallback = /```(?:python)?\n([\s\S]*?)```/g;
+    let idx = 0;
+    while ((m = fallback.exec(text)) !== null) {
+      blocks.push({ filename: idx === 0 ? 'experiment.py' : `file_${idx}.py`, content: m[1].trim() });
+      idx++;
+    }
+  }
+  return blocks;
+}
+
+function downloadCodeFile() {
+  if (!lastCodePlan) return;
+  const blocks = extractCodeBlocks(lastCodePlan);
+  // Download the main .py file (first python block)
+  const pyBlock = blocks.find(b => b.filename.endsWith('.py')) || blocks[0];
+  if (!pyBlock) { alert('No code found'); return; }
+  const blob = new Blob([pyBlock.content], { type: 'text/x-python' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = pyBlock.filename;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+function downloadAllCode() {
+  if (!lastCodePlan) return;
+  const blocks = extractCodeBlocks(lastCodePlan);
+  if (!blocks.length) { alert('No code found'); return; }
+
+  if (blocks.length === 1) {
+    downloadCodeFile();
+    return;
+  }
+
+  // Download each file individually
+  blocks.forEach(block => {
+    const type = block.filename.endsWith('.py') ? 'text/x-python' : 'text/plain';
+    const blob = new Blob([block.content], { type });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = block.filename;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  });
+}
 
 async function refreshLog() {
   const resp = await fetch('/api/experiments');

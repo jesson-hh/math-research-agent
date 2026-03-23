@@ -267,6 +267,13 @@
             <input type="text" id="note-chat-input" placeholder="e.g. expand the proof of Lemma 2..." class="search-input">
             <button class="btn-send" id="btn-note-chat" onclick="sendNoteEdit()">Send</button>
           </div>
+          <div class="note-confirm-bar" id="note-confirm-bar" style="display:none">
+            <span class="note-confirm-label">Agent proposed changes</span>
+            <div class="note-confirm-actions">
+              <button class="btn-send btn-sm" onclick="acceptNoteEdit()">Accept</button>
+              <button class="btn-clear btn-sm" onclick="rejectNoteEdit()">Reject</button>
+            </div>
+          </div>
         </div>
       </aside>
 
@@ -296,28 +303,75 @@
   <!-- TAB 3: Reports                        -->
   <!-- ══════════════════════════════════════ -->
   <div class="tab-content" id="tab-reports">
-    <div class="reports-layout">
-      <div class="report-card">
-        <h3>🧪 Experiment Log</h3>
+    <!-- Source Context -->
+    <div class="report-card">
+      <h3>Source Context</h3>
+      <div class="report-source-row">
+        <details class="accordion">
+          <summary>Ideas</summary>
+          <div id="report-ideas-preview" class="report-context-preview">
+            <p class="pool-empty">Generate ideas in Discover tab</p>
+          </div>
+        </details>
+        <details class="accordion">
+          <summary>Note (LaTeX)</summary>
+          <div id="report-note-preview" class="report-context-preview">
+            <p class="pool-empty">Generate a note in Note Workshop</p>
+          </div>
+        </details>
+      </div>
+    </div>
+
+    <!-- Experiment Design -->
+    <div class="report-card" style="margin-top:12px">
+      <h3>Experiment Design</h3>
+      <div class="report-input-row">
+        <input type="text" id="exp-instruction" placeholder="e.g. design experiments to verify the prime gap conjecture numerically..." class="search-input" style="flex:1">
+        <button class="btn-send" id="btn-design-exp" onclick="designExperiment()">Design</button>
+      </div>
+      <div id="experiment-plan-output" class="experiment-plan-content" style="display:none"></div>
+    </div>
+
+    <!-- Code Plan -->
+    <div class="report-card" style="margin-top:12px">
+      <h3>Code Plan</h3>
+      <div class="report-input-row">
+        <input type="text" id="code-instruction" placeholder="Additional instructions for code generation..." class="search-input" style="flex:1">
+        <button class="btn-send" id="btn-gen-code" onclick="generateCodePlan()" disabled>Generate Code</button>
+      </div>
+      <div id="code-plan-output" style="display:none">
+        <div id="code-plan-content" class="code-plan-content"></div>
+        <div class="code-plan-actions">
+          <button class="btn-send" id="btn-download-py" onclick="downloadCodeFile()" disabled>Download .py</button>
+          <button class="btn-clear" id="btn-download-all" onclick="downloadAllCode()" disabled>Download All Files</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Existing: Experiment Log (collapsed) -->
+    <details class="accordion report-card" style="margin-top:16px">
+      <summary>Experiment Log</summary>
+      <div style="padding:12px">
         <p id="log-summary">Total: 0 | Success rate: 0%</p>
         <div id="experiment-table"></div>
-        <button class="btn-send" onclick="refreshLog()">🔄 Refresh</button>
+        <button class="btn-send" onclick="refreshLog()" style="margin-top:8px">Refresh</button>
       </div>
-      <div class="report-card">
-        <h3>📄 Generate Reports</h3>
+    </details>
+
+    <!-- Existing: Report Generation (collapsed) -->
+    <details class="accordion report-card" style="margin-top:8px">
+      <summary>Generate Reports</summary>
+      <div style="padding:12px">
         <label><input type="radio" name="fmt" value="markdown" checked> Markdown</label>
         <label><input type="radio" name="fmt" value="latex"> LaTeX</label>
-        <div class="btn-row">
+        <div class="btn-row" style="margin-top:8px">
           <button class="btn-send" onclick="genReport()">Generate Report</button>
           <button class="btn-clear" onclick="genNotebook()">Generate Notebook</button>
         </div>
         <div id="report-download"></div>
+        <div id="report-preview" style="margin-top:12px"><em>Generate a report to see preview</em></div>
       </div>
-    </div>
-    <div class="report-card" style="margin-top:16px">
-      <h3>👁 Report Preview</h3>
-      <div id="report-preview"><em>Generate a report to see preview here</em></div>
-    </div>
+    </details>
   </div>
 
 </div>
