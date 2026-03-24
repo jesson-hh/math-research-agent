@@ -21,20 +21,28 @@ const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => document.querySelectorAll(sel);
 // (messagesDiv and input removed — Chat tab replaced by Note Workshop)
 
-// ── Tabs ──
-$$('.tab').forEach(tab => {
-  tab.addEventListener('click', () => {
-    $$('.tab').forEach(t => t.classList.remove('active'));
+// ── Sidebar Navigation ──
+$$('.nav-item').forEach(item => {
+  item.addEventListener('click', () => {
+    $$('.nav-item').forEach(t => t.classList.remove('active'));
     $$('.tab-content').forEach(tc => tc.classList.remove('active'));
-    tab.classList.add('active');
-    $(`#tab-${tab.dataset.tab}`).classList.add('active');
+    item.classList.add('active');
+    $(`#tab-${item.dataset.tab}`).classList.add('active');
+
+    // Show/hide sub-menu for Paper Search
+    const sub = $('#nav-sub-discover');
+    if (item.dataset.tab === 'discover') {
+      sub.classList.remove('collapsed');
+    } else {
+      sub.classList.add('collapsed');
+    }
   });
 });
 
-// ── Discover Sub-tabs ──
-$$('.discover-subtab').forEach(btn => {
+// ── Discover Sub-navigation ──
+$$('.nav-subitem').forEach(btn => {
   btn.addEventListener('click', () => {
-    $$('.discover-subtab').forEach(b => b.classList.remove('active'));
+    $$('.nav-subitem').forEach(b => b.classList.remove('active'));
     $$('.discover-subcontent').forEach(c => c.classList.remove('active'));
     btn.classList.add('active');
     $(`#subtab-${btn.dataset.subtab}`).classList.add('active');
@@ -924,7 +932,7 @@ function syncNoteContext() {
 }
 
 // Hook into tab switching
-$$('.tab').forEach(tab => {
+$$('.nav-item').forEach(tab => {
   tab.addEventListener('click', () => {
     if (tab.dataset.tab === 'chat') {
       setTimeout(syncNoteContext, 50);
@@ -1358,7 +1366,7 @@ function syncReportContext() {
 }
 
 // Hook tab switching for Reports
-$$('.tab').forEach(tab => {
+$$('.nav-item').forEach(tab => {
   tab.addEventListener('click', () => {
     if (tab.dataset.tab === 'reports') {
       setTimeout(syncReportContext, 50);

@@ -12,28 +12,46 @@
 <body>
 <div class="app">
 
-  <header class="hero">
-    <h1>∑ Math Research Agent</h1>
-    <p>Paper Discovery → Idea Generation — Powered by LLM + arXiv</p>
-  </header>
+  <!-- Left sidebar navigation -->
+  <nav class="sidebar-nav">
+    <div class="nav-brand">
+      <span class="nav-brand-icon">&sum;</span>
+      <div>
+        <h1>Math Research</h1>
+        <p>Agent</p>
+      </div>
+    </div>
 
-  <nav class="tabs">
-    <button class="tab active" data-tab="discover">📄 Discover</button>
-    <button class="tab" data-tab="chat">📝 Note Workshop</button>
-    <button class="tab" data-tab="reports">📈 Reports</button>
+    <div class="nav-items">
+      <button class="nav-item active" data-tab="discover">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        Paper Search
+      </button>
+      <div class="nav-sub" id="nav-sub-discover">
+        <button class="nav-subitem active" data-subtab="papers">Papers</button>
+        <button class="nav-subitem" data-subtab="techlearn">Author Analysis</button>
+        <button class="nav-subitem" data-subtab="relations">Network Graph</button>
+      </div>
+
+      <button class="nav-item" data-tab="chat">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+        LaTeX Editor
+      </button>
+
+      <button class="nav-item" data-tab="reports">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+        Reports
+      </button>
+    </div>
   </nav>
+
+  <!-- Main content area -->
+  <div class="app-content">
 
   <!-- ══════════════════════════════════════ -->
   <!-- TAB 1: Paper Discovery + Idea Gen     -->
   <!-- ══════════════════════════════════════ -->
   <div class="tab-content active" id="tab-discover">
-
-    <!-- Sub-tab navigation -->
-    <div class="discover-subtabs">
-      <button class="discover-subtab active" data-subtab="papers">Papers</button>
-      <button class="discover-subtab" data-subtab="techlearn">Tech Learning</button>
-      <button class="discover-subtab" data-subtab="relations">Relations</button>
-    </div>
 
     <!-- ── Sub-tab 1: Papers (existing) ── -->
     <div class="discover-subcontent active" id="subtab-papers">
@@ -373,6 +391,8 @@
       </div>
     </details>
   </div>
+
+  </div><!-- .app-content -->
 
 </div>
 
