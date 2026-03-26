@@ -1,16 +1,11 @@
-import os
 import json
-from dotenv import load_dotenv
 
 from tools import TOOL_DEFINITIONS, dispatch_tool
 from context.conversation import ConversationManager
 from context.compressor import maybe_compress
 from tracking import get_experiment_log
 from llm import get_client
-
-load_dotenv()
-
-MAX_TOKENS = 8192
+from config import MAX_TOKENS
 
 SYSTEM_PROMPT = """You are a Mathematical Research Agent with deep expertise across pure and applied mathematics.
 

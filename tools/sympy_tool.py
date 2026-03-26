@@ -1,8 +1,12 @@
+import threading
+
 import sympy as sp
 from sympy import (
     symbols, sympify, diff, integrate, solve, simplify,
     expand, factor, limit, series, oo, latex, pi, E, I,
 )
+
+from config import SYMPY_TIMEOUT
 
 
 def symbolic_compute(
@@ -34,11 +38,25 @@ def symbolic_compute(
     except Exception as e:
         return {"error": f"Could not parse expression '{expression}': {e}"}
 
-    try:
-        result = _dispatch_operation(expr, operation, sym_vars, x, local_ns, params)
-    except Exception as e:
-        return {"error": str(e), "expression": expression, "operation": operation}
+    result_holder = [None]
+    error_holder = [None]
 
+    def _compute():
+        try:
+            result_holder[0] = _dispatch_operation(expr, operation, sym_vars, x, local_ns, params)
+        except Exception as e:
+            error_holder[0] = str(e)
+
+    thread = threading.Thread(target=_compute, daemon=True)
+    thread.start()
+    thread.join(timeout=SYMPY_TIMEOUT)
+
+    if thread.is_alive():
+        return {"error": f"Computation timed out after {SYMPY_TIMEOUT}s", "expression": expression, "operation": operation}
+    if error_holder[0]:
+        return {"error": error_holder[0], "expression": expression, "operation": operation}
+
+    result = result_holder[0]
     if result is None:
         return {"error": f"Unknown operation: {operation}"}
 

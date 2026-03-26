@@ -1,4 +1,26 @@
+import time
 import arxiv
+
+from config import ARXIV_DELAY, ARXIV_RETRIES
+
+# Simple in-memory cache with TTL
+_cache = {}
+_CACHE_TTL = 300  # 5 minutes
+_CACHE_MAX = 100
+
+
+def _cache_get(key: str):
+    entry = _cache.get(key)
+    if entry and (time.time() - entry["time"]) < _CACHE_TTL:
+        return entry["data"]
+    return None
+
+
+def _cache_set(key: str, data):
+    _cache[key] = {"data": data, "time": time.time()}
+    if len(_cache) > _CACHE_MAX:
+        oldest = min(_cache, key=lambda k: _cache[k]["time"])
+        del _cache[oldest]
 
 CATEGORY_MAP = {
     "algebraic topology": "math.AT",
@@ -38,7 +60,13 @@ def arxiv_search(
     }.get(sort_by, arxiv.SortCriterion.Relevance)
 
     limit = min(max(1, max_results), 20)
-    client = arxiv.Client(page_size=limit, delay_seconds=3.0, num_retries=3)
+
+    cache_key = f"{full_query}|{limit}|{sort_by}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    client = arxiv.Client(page_size=limit, delay_seconds=ARXIV_DELAY, num_retries=ARXIV_RETRIES)
     search = arxiv.Search(
         query=full_query,
         max_results=limit,
@@ -60,12 +88,14 @@ def arxiv_search(
             "journal_ref": result.journal_ref or "",
         })
 
-    return {
+    result = {
         "query": full_query,
         "total_found": len(papers),
         "domain_category": cat or "all math",
         "papers": papers,
     }
+    _cache_set(cache_key, result)
+    return result
 
 
 def arxiv_author_search(
@@ -75,7 +105,7 @@ def arxiv_author_search(
     """Search arXiv papers by author name. Returns full abstracts and all authors."""
     full_query = f'au:"{author}"'
     limit = min(max(1, max_results), 30)
-    client = arxiv.Client(page_size=limit, delay_seconds=3.0, num_retries=3)
+    client = arxiv.Client(page_size=limit, delay_seconds=ARXIV_DELAY, num_retries=ARXIV_RETRIES)
     search = arxiv.Search(
         query=full_query,
         max_results=limit,

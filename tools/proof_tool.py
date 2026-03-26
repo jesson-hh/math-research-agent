@@ -1,9 +1,7 @@
-import os
 import json
 import re
-from dotenv import load_dotenv
 
-load_dotenv()
+from config import PROOF_MODEL, PROOF_MAX_TOKENS
 
 PROOF_SYSTEM_PROMPT = """You are a rigorous mathematical proof assistant with expertise across all areas of mathematics.
 
@@ -44,8 +42,7 @@ def proof_assist(
 ) -> dict:
     from llm import get_client
 
-    proof_model = os.environ.get("PROOF_MODEL", "").strip() or None
-    client = get_client(model_override=proof_model)
+    client = get_client(model_override=PROOF_MODEL)
 
     mode_instruction = {
         "outline": "Provide a high-level outline with 3-6 key steps only. Keep steps brief.",
@@ -72,7 +69,7 @@ Instructions:
     result = client.chat(
         system=PROOF_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_content}],
-        max_tokens=4096,
+        max_tokens=PROOF_MAX_TOKENS,
     )
 
     # Extract text from content blocks
@@ -82,13 +79,8 @@ Instructions:
             text += block["text"]
 
     # Try to parse JSON from response
-    try:
-        json_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
-        if json_match:
-            proof_data = json.loads(json_match.group(1))
-        else:
-            proof_data = json.loads(text)
-    except (json.JSONDecodeError, AttributeError):
+    proof_data = _extract_json(text)
+    if proof_data is None:
         proof_data = {
             "theorem": theorem,
             "strategy": strategy,
@@ -97,3 +89,60 @@ Instructions:
         }
 
     return proof_data
+
+
+def _extract_json(text: str) -> dict | None:
+    """Extract the first complete JSON object from text, handling nested braces."""
+    # Try fenced code block first
+    fence_match = re.search(r"```(?:json)?\s*", text)
+    if fence_match:
+        result = _find_balanced_json(text, fence_match.end())
+        if result is not None:
+            return result
+
+    # Try raw JSON
+    brace_idx = text.find("{")
+    if brace_idx >= 0:
+        result = _find_balanced_json(text, brace_idx)
+        if result is not None:
+            return result
+
+    # Last resort: try parsing entire text
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return None
+
+
+def _find_balanced_json(text: str, start: int) -> dict | None:
+    """Find a balanced JSON object starting from position start and parse it."""
+    idx = text.find("{", start)
+    if idx < 0:
+        return None
+
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(idx, len(text)):
+        c = text[i]
+        if escape:
+            escape = False
+            continue
+        if c == "\\":
+            escape = True
+            continue
+        if c == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(text[idx:i + 1])
+                except json.JSONDecodeError:
+                    return None
+    return None

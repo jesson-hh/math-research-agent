@@ -12,6 +12,36 @@ let lastAnalysisText = '';   // for download
 // Paper analysis & QA state
 let paperQAHistory = [];
 
+// ── Abort Controllers ──
+let activeControllers = {};
+
+function startAbortable(name) {
+  if (activeControllers[name]) activeControllers[name].abort();
+  const controller = new AbortController();
+  activeControllers[name] = controller;
+  return controller;
+}
+
+function cancelOperation(name) {
+  if (activeControllers[name]) {
+    activeControllers[name].abort();
+    delete activeControllers[name];
+    isStreaming = false;
+  }
+}
+
+// ── Toast Notifications ──
+function showToast(message, type = 'info', duration = 4000) {
+  const container = document.getElementById('toast-container');
+  if (!container) return;
+  const toast = document.createElement('div');
+  toast.className = `toast ${type}`;
+  toast.textContent = message;
+  toast.addEventListener('click', () => toast.remove());
+  container.appendChild(toast);
+  setTimeout(() => { if (toast.parentNode) toast.remove(); }, duration);
+}
+
 // Relations state
 let currentGraphData = null;   // { nodes, edges, stats }
 let currentNetworkType = 'coauthor';
@@ -32,6 +62,20 @@ function loadState(key, fallback) {
   } catch { return fallback; }
 }
 
+// ── Paper QA Persistence ──
+function savePaperQA(arxivId, history) {
+  if (!arxivId) return;
+  const allQA = loadState('paperQAHistories', {});
+  allQA[arxivId] = history;
+  const keys = Object.keys(allQA);
+  if (keys.length > 10) delete allQA[keys[0]];
+  saveState('paperQAHistories', allQA);
+}
+function loadPaperQA(arxivId) {
+  const allQA = loadState('paperQAHistories', {});
+  return allQA[arxivId] || [];
+}
+
 // ── Theme Toggle ──
 function toggleTheme() {
   document.documentElement.classList.toggle('dark');
@@ -44,6 +88,221 @@ function toggleTheme() {
   if (saved === 'dark') document.documentElement.classList.add('dark');
 })();
 
+// ══════════════════════════════════════
+// History Management System
+// ══════════════════════════════════════
+let activeHistoryItems = {};  // { type: id } tracks which item is loaded per type
+
+async function historyList(type) {
+  try {
+    const resp = await fetch(`/api/history/${type}`);
+    const data = await resp.json();
+    return data.items || [];
+  } catch { return []; }
+}
+
+async function historyGet(type, id) {
+  const resp = await fetch(`/api/history/${type}/${id}`);
+  if (!resp.ok) return null;
+  return resp.json();
+}
+
+async function historySave(type, name, data) {
+  const resp = await fetch(`/api/history/${type}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, data }),
+  });
+  if (!resp.ok) { showToast('Failed to save', 'error'); return null; }
+  const meta = await resp.json();
+  activeHistoryItems[type] = meta.id;
+  await renderHistoryList(type);
+  showToast(`Saved: ${name}`, 'info', 2000);
+  return meta;
+}
+
+async function historyRename(type, id, newName) {
+  await fetch(`/api/history/${type}/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: newName }),
+  });
+}
+
+async function historyDelete(type, id) {
+  await fetch(`/api/history/${type}/${id}`, { method: 'DELETE' });
+  if (activeHistoryItems[type] === id) delete activeHistoryItems[type];
+  await renderHistoryList(type);
+}
+
+async function renderHistoryList(type) {
+  const listEl = document.getElementById(`history-list-${type}`);
+  if (!listEl) return;
+  const items = await historyList(type);
+  if (!items.length) {
+    listEl.innerHTML = '<div class="history-empty">No saved items</div>';
+    return;
+  }
+  listEl.innerHTML = items.map(item => {
+    const isActive = activeHistoryItems[type] === item.id;
+    const shortDate = item.created.slice(0, 10);
+    return `<div class="history-item${isActive ? ' active' : ''}" data-type="${type}" data-id="${item.id}">
+      <span class="history-item-name" title="${item.name}\n${shortDate}">${item.name}</span>
+      <button class="history-item-delete" title="Delete">&times;</button>
+    </div>`;
+  }).join('');
+
+  // Click to load
+  listEl.querySelectorAll('.history-item').forEach(el => {
+    el.addEventListener('click', (e) => {
+      if (e.target.classList.contains('history-item-delete')) return;
+      if (e.target.getAttribute('contenteditable') === 'true') return;
+      loadHistoryItem(el.dataset.type, el.dataset.id);
+    });
+    // Double-click to rename
+    const nameEl = el.querySelector('.history-item-name');
+    nameEl.addEventListener('dblclick', (e) => {
+      e.stopPropagation();
+      nameEl.setAttribute('contenteditable', 'true');
+      nameEl.focus();
+      // Select all text
+      const range = document.createRange();
+      range.selectNodeContents(nameEl);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+    });
+    nameEl.addEventListener('blur', () => {
+      nameEl.removeAttribute('contenteditable');
+      const newName = nameEl.textContent.trim();
+      if (newName) historyRename(el.dataset.type, el.dataset.id, newName);
+    });
+    nameEl.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); nameEl.blur(); }
+      if (e.key === 'Escape') { nameEl.blur(); }
+    });
+  });
+
+  // Delete buttons
+  listEl.querySelectorAll('.history-item-delete').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const item = btn.closest('.history-item');
+      if (confirm('Delete this item?')) {
+        historyDelete(item.dataset.type, item.dataset.id);
+      }
+    });
+  });
+}
+
+async function loadHistoryItem(type, id) {
+  const item = await historyGet(type, id);
+  if (!item) { showToast('Item not found', 'error'); return; }
+  activeHistoryItems[type] = id;
+
+  if (type === 'ideas') {
+    // Load ideas into the idea display
+    const ideaContent = item.data.content || '';
+    $('#idea-content').innerHTML = renderMarkdown(ideaContent);
+    $('#idea-output').style.display = 'block';
+    saveState('lastIdeas', ideaContent);
+    // Switch to discover tab, papers subtab
+    switchToTab('discover');
+  } else if (type === 'pools') {
+    // Load pool
+    selectedPool = item.data.papers || [];
+    renderPool();
+    saveState('selectedPool', selectedPool);
+    switchToTab('discover');
+  } else if (type === 'notes') {
+    // Load note into editor
+    noteLatex = item.data.latex || '';
+    $('#note-editor').value = noteLatex;
+    if (typeof syncEditorHighlight === 'function') syncEditorHighlight();
+    saveState('noteLatex', noteLatex);
+    switchToTab('chat');
+  } else if (type === 'networks') {
+    // Load network graph
+    currentGraphData = item.data.graph || null;
+    if (currentGraphData) {
+      renderNetwork();
+    }
+    switchToTab('discover');
+    // Switch to relations subtab
+    $$('.nav-subitem').forEach(b => b.classList.remove('active'));
+    $$('.discover-subcontent').forEach(c => c.classList.remove('active'));
+    const relBtn = document.querySelector('[data-subtab="relations"]');
+    if (relBtn) relBtn.classList.add('active');
+    const relTab = document.getElementById('subtab-relations');
+    if (relTab) relTab.classList.add('active');
+  }
+
+  await renderHistoryList(type);
+}
+
+function switchToTab(tabName) {
+  $$('.nav-item').forEach(t => t.classList.remove('active'));
+  $$('.tab-content').forEach(tc => tc.classList.remove('active'));
+  const btn = document.querySelector(`.nav-item[data-tab="${tabName}"]`);
+  if (btn) btn.classList.add('active');
+  const tab = document.getElementById(`tab-${tabName}`);
+  if (tab) tab.classList.add('active');
+  // Show/hide discover sub-menu
+  const sub = $('#nav-sub-discover');
+  const histDiscover = $('#nav-history-discover');
+  const histChat = $('#nav-history-chat');
+  if (tabName === 'discover') {
+    if (sub) sub.classList.remove('collapsed');
+    if (histDiscover) histDiscover.classList.remove('collapsed');
+  } else {
+    if (sub) sub.classList.add('collapsed');
+    if (histDiscover) histDiscover.classList.add('collapsed');
+  }
+  if (tabName === 'chat') {
+    if (histChat) histChat.classList.remove('collapsed');
+  } else {
+    if (histChat) histChat.classList.add('collapsed');
+  }
+}
+
+function autoNameFromContent(content, prefix) {
+  const date = new Date().toISOString().slice(0, 10);
+  // Extract first meaningful words from content
+  const text = content.replace(/[#*`\n]/g, ' ').trim();
+  const words = text.split(/\s+/).filter(w => w.length > 2).slice(0, 5).join(' ');
+  const snippet = words.length > 30 ? words.slice(0, 30) + '...' : words;
+  return `${date} ${snippet || prefix}`;
+}
+
+// Initialize history sections: toggle expand/collapse
+document.querySelectorAll('.history-header').forEach(header => {
+  header.addEventListener('click', (e) => {
+    if (e.target.classList.contains('history-save-btn')) return;
+    header.classList.toggle('expanded');
+  });
+});
+
+// Save pool button
+const btnSavePool = document.getElementById('btn-save-pool');
+if (btnSavePool) {
+  btnSavePool.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    if (!selectedPool.length) { showToast('Pool is empty', 'warning'); return; }
+    const name = autoNameFromContent(selectedPool.map(p => p.title).join(', '), 'Paper Pool');
+    await historySave('pools', name, { papers: selectedPool });
+  });
+}
+
+// Load all history lists on startup
+async function initHistoryLists() {
+  await Promise.all([
+    renderHistoryList('ideas'),
+    renderHistoryList('pools'),
+    renderHistoryList('notes'),
+    renderHistoryList('networks'),
+  ]);
+}
+
 // ── Sidebar Navigation ──
 $$('.nav-item').forEach(item => {
   item.addEventListener('click', () => {
@@ -53,12 +312,21 @@ $$('.nav-item').forEach(item => {
     $(`#tab-${item.dataset.tab}`).classList.add('active');
     saveState('activeTab', item.dataset.tab);
 
-    // Show/hide sub-menu for Paper Search
+    // Show/hide sub-menus and history sections
     const sub = $('#nav-sub-discover');
+    const histDiscover = $('#nav-history-discover');
+    const histChat = $('#nav-history-chat');
     if (item.dataset.tab === 'discover') {
       sub.classList.remove('collapsed');
+      if (histDiscover) histDiscover.classList.remove('collapsed');
     } else {
       sub.classList.add('collapsed');
+      if (histDiscover) histDiscover.classList.add('collapsed');
+    }
+    if (item.dataset.tab === 'chat') {
+      if (histChat) histChat.classList.remove('collapsed');
+    } else {
+      if (histChat) histChat.classList.add('collapsed');
     }
   });
 });
@@ -133,32 +401,47 @@ function downloadJSON(data, filename) {
 }
 
 // Helper: read SSE stream
-async function readSSE(resp, onText, onDone) {
+async function readSSE(resp, onText, onDone, signal) {
   const reader = resp.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
   let fullText = '';
+  let receivedDone = false;
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split('\n');
-    buffer = lines.pop();
-    for (const line of lines) {
-      if (!line.startsWith('data: ')) continue;
-      const data = line.slice(6);
-      if (data === '[DONE]') continue;
-      let evt;
-      try { evt = JSON.parse(data); } catch { continue; }
-      if (evt.type === 'text') {
-        fullText = evt.content;
-        onText(fullText);
-      } else if (evt.type === 'done') {
-        if (evt.content) fullText = evt.content;
-        if (onDone) onDone(fullText);
+  if (signal) {
+    signal.addEventListener('abort', () => reader.cancel());
+  }
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const data = line.slice(6);
+        if (data === '[DONE]') { receivedDone = true; continue; }
+        let evt;
+        try { evt = JSON.parse(data); } catch { continue; }
+        if (evt.type === 'text') {
+          fullText = evt.content;
+          onText(fullText);
+        } else if (evt.type === 'done') {
+          receivedDone = true;
+          if (evt.content) fullText = evt.content;
+          if (onDone) onDone(fullText);
+        }
       }
     }
+  } catch (e) {
+    if (e.name === 'AbortError') return fullText;
+    throw e;
+  }
+
+  if (!receivedDone && fullText) {
+    showToast('Stream ended unexpectedly. Response may be incomplete.', 'warning');
   }
   return fullText;
 }
@@ -249,9 +532,15 @@ function openDetail(index) {
   $('#detail-url').href = p.url || '#';
   const inPool = selectedPool.some(s => s.arxiv_id === p.arxiv_id);
   $('#btn-add-pool').textContent = inPool ? '- Remove from Pool' : '+ Add to Pool';
-  // Reset analysis & QA state
-  paperQAHistory = [];
+  // Restore or reset QA state
+  paperQAHistory = loadPaperQA(p.arxiv_id);
   $('#qa-messages').innerHTML = '';
+  for (const msg of paperQAHistory) {
+    const div = document.createElement('div');
+    div.className = `qa-msg qa-${msg.role}`;
+    div.innerHTML = msg.role === 'assistant' ? marked.parse(msg.content) : escapeHtml(msg.content);
+    $('#qa-messages').appendChild(div);
+  }
   $('#paper-analysis-output').style.display = 'none';
   $('#paper-analysis-content').innerHTML = '';
   $('#btn-analyze-paper').disabled = false;
@@ -370,6 +659,7 @@ async function askPaperQuestion() {
       () => {}
     );
     paperQAHistory.push({ role: 'assistant', content: fullText });
+    if (currentDetail) savePaperQA(currentDetail.arxiv_id, paperQAHistory);
   } catch (err) {
     assistantDiv.innerHTML = `<span style="color:var(--red)">Error: ${err.message}</span>`;
   }
@@ -382,7 +672,7 @@ $('#qa-input').addEventListener('keydown', e => {
 });
 
 async function autoSelect() {
-  if (!papers.length) { alert('Search for papers first'); return; }
+  if (!papers.length) { showToast('Search for papers first', 'warning'); return; }
   const mode = document.querySelector('input[name="sel-mode"]:checked').value;
   const prompt = mode === 'prompt' ? $('#sel-prompt').value.trim() : '';
 
@@ -405,7 +695,7 @@ async function autoSelect() {
     renderPool();
     updateGenerateBtn();
   } catch (err) {
-    alert('Auto-select failed: ' + err.message);
+    showToast('Auto-select failed: ' + err.message, 'error');
   }
 
   $('#btn-auto-select').disabled = false;
@@ -428,14 +718,21 @@ async function generateIdeas() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ papers: selectedPool, prompt: userPrompt }),
     });
+    let finalText = '';
     await readSSE(resp,
-      text => { contentDiv.innerHTML = renderMarkdown(text); },
+      text => { contentDiv.innerHTML = renderMarkdown(text); finalText = text; },
       text => {
+        finalText = text;
         contentDiv.innerHTML = renderMarkdown(text);
         saveState('lastIdeas', text);
       }
     );
     outputDiv.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    // Auto-save to history
+    if (finalText) {
+      const name = autoNameFromContent(finalText, 'Ideas');
+      historySave('ideas', name, { content: finalText, papers: selectedPool.map(p => p.title) });
+    }
   } catch (err) {
     contentDiv.innerHTML = `<p style="color:var(--red)">Error: ${err.message}</p>`;
   }
@@ -598,7 +895,7 @@ function downloadTechAnalysis() {
 
 async function buildCoauthorNetwork() {
   const author = $('#rel-author').value.trim();
-  if (!author) { alert('Enter an author name'); return; }
+  if (!author) { showToast('Enter an author name', 'warning'); return; }
 
   // Try to use authorPapers if same author, otherwise fetch
   let papersToUse = authorPapers;
@@ -647,7 +944,7 @@ async function buildCitationNetwork() {
   // Use papers from selectedPool or techAnalysisPool
   const poolPapers = selectedPool.length ? selectedPool : techAnalysisPool;
   if (!poolPapers.length) {
-    alert('Select papers in Papers or Tech Learning tab first');
+    showToast('Select papers in Papers or Tech Learning tab first', 'warning');
     return;
   }
 
@@ -672,7 +969,7 @@ async function buildCitationNetwork() {
 async function addPapersToNetwork() {
   const arxivId = $('#rel-add-arxiv').value.trim();
   if (!arxivId) return;
-  if (!currentGraphData) { alert('Build a network first'); return; }
+  if (!currentGraphData) { showToast('Build a network first', 'warning'); return; }
 
   $('#network-display').style.display = 'block';
   $('#network-display').innerHTML = '<div class="paper-list-loading">Adding papers to network...</div>';
@@ -722,6 +1019,17 @@ function renderNetwork() {
 
   // Enable download
   $('#btn-rel-download').disabled = false;
+
+  // Auto-save network to history
+  const centerNode = currentGraphData.nodes.find(n => n.is_center);
+  const netName = autoNameFromContent(
+    centerNode ? centerNode.name : `${currentNetworkType} network`,
+    'Network'
+  );
+  historySave('networks', netName, {
+    graph: currentGraphData,
+    type: currentNetworkType,
+  });
 }
 
 function drawNetworkCanvas(data) {
@@ -967,7 +1275,7 @@ function syncNoteContext() {
 $$('.nav-item').forEach(tab => {
   tab.addEventListener('click', () => {
     if (tab.dataset.tab === 'chat') {
-      setTimeout(syncNoteContext, 50);
+      requestAnimationFrame(syncNoteContext);
     }
   });
 });
@@ -979,7 +1287,7 @@ async function generateNote() {
   const templatePrompt = NOTE_TEMPLATES[template] || '';
 
   if (!selectedPool.length && !ideasText && !instruction) {
-    alert('Add papers to pool or generate ideas in Discover tab, or provide instructions.');
+    showToast('Add papers to pool or generate ideas in Discover tab, or provide instructions.', 'warning');
     return;
   }
 
@@ -1025,6 +1333,11 @@ async function generateNote() {
 
     $('#btn-preview-note').disabled = false;
     $('#btn-download-tex').disabled = false;
+    // Auto-save note to history
+    if (noteLatex.trim()) {
+      const name = autoNameFromContent(noteLatex, 'Note');
+      historySave('notes', name, { latex: noteLatex });
+    }
   } catch (err) {
     editor.value = `% Error: ${err.message}`;
   }
@@ -1036,7 +1349,7 @@ async function sendNoteEdit() {
   const inputEl = $('#note-chat-input');
   const instruction = inputEl.value.trim();
   if (!instruction) return;
-  if (!noteLatex.trim()) { alert('Generate a note first'); return; }
+  if (!noteLatex.trim()) { showToast('Generate a note first', 'warning'); return; }
 
   inputEl.value = '';
   const chatMessages = $('#note-chat-messages');
@@ -1126,6 +1439,14 @@ function acceptNoteEdit() {
   // Refresh preview if visible
   if ($('#note-preview-section').style.display !== 'none') {
     previewNote();
+  }
+
+  // Auto-save updated note
+  if (noteLatex.trim() && activeHistoryItems.notes) {
+    // Update existing note: delete old, save new with same approach
+    // For simplicity, just save a new version
+    const name = autoNameFromContent(noteLatex, 'Note');
+    historySave('notes', name, { latex: noteLatex });
   }
 }
 
@@ -1409,7 +1730,7 @@ function syncReportContext() {
 $$('.nav-item').forEach(tab => {
   tab.addEventListener('click', () => {
     if (tab.dataset.tab === 'reports') {
-      setTimeout(syncReportContext, 50);
+      requestAnimationFrame(syncReportContext);
     }
   });
 });
@@ -1419,7 +1740,7 @@ async function designExperiment() {
   const ideasText = $('#idea-content') ? $('#idea-content').textContent.trim() : '';
 
   if (!ideasText && !noteLatex && !instruction) {
-    alert('Generate ideas or a note first, or enter instructions.');
+    showToast('Generate ideas or a note first, or enter instructions.', 'warning');
     return;
   }
 
@@ -1459,7 +1780,7 @@ $('#exp-instruction').addEventListener('keydown', e => {
 });
 
 async function generateCodePlan() {
-  if (!lastExperimentPlan) { alert('Design an experiment first'); return; }
+  if (!lastExperimentPlan) { showToast('Design an experiment first', 'warning'); return; }
 
   const instruction = $('#code-instruction').value.trim();
   const btn = $('#btn-gen-code');
@@ -1525,7 +1846,7 @@ function downloadCodeFile() {
   const blocks = extractCodeBlocks(lastCodePlan);
   // Download the main .py file (first python block)
   const pyBlock = blocks.find(b => b.filename.endsWith('.py')) || blocks[0];
-  if (!pyBlock) { alert('No code found'); return; }
+  if (!pyBlock) { showToast('No code found', 'warning'); return; }
   const blob = new Blob([pyBlock.content], { type: 'text/x-python' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
@@ -1537,7 +1858,7 @@ function downloadCodeFile() {
 function downloadAllCode() {
   if (!lastCodePlan) return;
   const blocks = extractCodeBlocks(lastCodePlan);
-  if (!blocks.length) { alert('No code found'); return; }
+  if (!blocks.length) { showToast('No code found', 'warning'); return; }
 
   if (blocks.length === 1) {
     downloadCodeFile();
@@ -1610,7 +1931,7 @@ function switchResearchOutput(tab) {
 
 async function startAutonomousResearch() {
   const goal = $('#research-goal').value.trim();
-  if (!goal) { alert('Please enter a research goal.'); return; }
+  if (!goal) { showToast('Please enter a research goal.', 'warning'); return; }
 
   const domain = $('#research-domain').value;
   const maxIter = parseInt($('#research-max-iter').value);
@@ -1764,7 +2085,7 @@ function syncEditorHighlight() {
 
 function generateBibTeX() {
   if (!selectedPool.length) {
-    alert('No papers in selection pool. Add papers in the Paper Search tab first.');
+    showToast('No papers in selection pool. Add papers in the Paper Search tab first.', 'warning');
     return;
   }
 
@@ -1872,4 +2193,13 @@ const NOTE_TEMPLATES = {
     const subBtn = $(`.nav-subitem[data-subtab="${savedSubTab}"]`);
     if (subBtn) subBtn.click();
   }
+
+  // Initialize history lists
+  initHistoryLists();
+
+  // Collapse history sections for inactive tabs
+  const histChat = $('#nav-history-chat');
+  if (histChat && savedTab !== 'chat') histChat.classList.add('collapsed');
+  const histDiscover = $('#nav-history-discover');
+  if (histDiscover && savedTab !== 'discover') histDiscover.classList.add('collapsed');
 })();

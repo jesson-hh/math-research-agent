@@ -266,8 +266,14 @@ TOOL_DISPATCH = {
 
 def dispatch_tool(name: str, inputs: dict) -> dict:
     if name not in TOOL_DISPATCH:
-        return {"error": f"Unknown tool: {name}"}
+        return {"error": f"Unknown tool: {name}", "success": False}
     try:
-        return TOOL_DISPATCH[name](**inputs)
+        result = TOOL_DISPATCH[name](**inputs)
+        if isinstance(result, dict):
+            if "error" in result:
+                result.setdefault("success", False)
+            else:
+                result.setdefault("success", True)
+        return result
     except Exception as e:
-        return {"error": str(e), "tool": name}
+        return {"error": str(e), "tool": name, "success": False}

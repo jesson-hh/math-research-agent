@@ -50,6 +50,7 @@ class AutonomousResearchLoop:
         history = []
         scratchpad_lines = []
         all_images = []
+        retried_tasks = set()  # Track which tasks have been retried (max 1 retry each)
 
         # ── Phase 1: PLANNING ──
         self.state.status = "planning"
@@ -165,7 +166,22 @@ class AutonomousResearchLoop:
 
             # Parse evaluation from last assistant message
             success, finding, new_task = self._parse_evaluation(history)
-            self.todo.update(task.id, "done", finding)
+
+            if not success and task.id not in retried_tasks:
+                # Retry failed task once with reflection context
+                retried_tasks.add(task.id)
+                self.todo.update(task.id, "done", f"FAILED: {finding}")
+                retry_desc = f"RETRY: {task.description} (previous attempt failed: {finding[:80]})"
+                retry_task = self.todo.add(retry_desc)
+                # Move retry task to front of pending queue
+                self.todo.tasks.remove(retry_task)
+                pending_idx = next(
+                    (i for i, t in enumerate(self.todo.tasks) if t.status == "pending"),
+                    len(self.todo.tasks),
+                )
+                self.todo.tasks.insert(pending_idx, retry_task)
+            else:
+                self.todo.update(task.id, "done", finding)
 
             if new_task:
                 self.todo.add(new_task)

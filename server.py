@@ -2,9 +2,13 @@
 
 import os
 import json
+import pathlib
 
-from dotenv import load_dotenv
-load_dotenv()
+from config import SERVER_HOST, SERVER_PORT, API_KEY, MODEL, LLM_PROVIDER, BASE_URL
+from log import setup_logging, get_logger
+
+setup_logging()
+logger = get_logger("server")
 
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
@@ -15,6 +19,8 @@ import time
 import io
 import base64
 import re
+import queue
+import threading
 import httpx
 import networkx as nx
 
@@ -30,8 +36,11 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 app = FastAPI(title="Math Research Agent")
-agent = MathResearchAgent()
 experiment_log = get_experiment_log()
+
+# Thread safety: autonomous mode uses a dedicated agent + lock
+_autonomous_lock = threading.Lock()
+_autonomous_agent = None
 
 # Serve static files
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -40,6 +49,33 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 @app.get("/")
 async def index():
     return FileResponse("static/index.html")
+
+
+def with_heartbeat(sync_gen, interval: float = 15.0):
+    """Wrap a sync generator with SSE heartbeat comments to keep connections alive."""
+    q = queue.Queue()
+    sentinel = object()
+
+    def producer():
+        try:
+            for item in sync_gen():
+                q.put(item)
+        except Exception as e:
+            q.put(f"data: {json.dumps({'type': 'error', 'content': str(e)}, ensure_ascii=False)}\n\n")
+        finally:
+            q.put(sentinel)
+
+    thread = threading.Thread(target=producer, daemon=True)
+    thread.start()
+
+    while True:
+        try:
+            item = q.get(timeout=interval)
+            if item is sentinel:
+                break
+            yield item
+        except queue.Empty:
+            yield ": heartbeat\n\n"
 
 
 @app.post("/api/chat")
@@ -51,8 +87,9 @@ async def chat(request: Request):
     max_papers = body.get("max_papers", 8)
 
     def event_stream():
+        request_agent = MathResearchAgent()
         last_text = ""
-        for history, scratchpad, images in agent.stream_response(
+        for history, scratchpad, images in request_agent.stream_response(
             message, [], domain, max_papers
         ):
             # Extract latest assistant text
@@ -81,7 +118,7 @@ async def chat(request: Request):
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(
-        event_stream(),
+        with_heartbeat(event_stream),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -117,22 +154,77 @@ async def generate_notebook_endpoint():
     return JSONResponse({"filepath": filepath})
 
 
+ALLOWED_DOWNLOAD_DIR = pathlib.Path("research_log").resolve()
+
 @app.get("/api/download")
 async def download(path: str):
-    if os.path.exists(path):
-        return FileResponse(path, filename=os.path.basename(path))
-    return JSONResponse({"error": "File not found"}, status_code=404)
+    resolved = pathlib.Path(path).resolve()
+    if not str(resolved).startswith(str(ALLOWED_DOWNLOAD_DIR)):
+        return JSONResponse({"error": "Access denied"}, status_code=403)
+    if not resolved.exists():
+        return JSONResponse({"error": "File not found"}, status_code=404)
+    return FileResponse(str(resolved), filename=resolved.name)
+
+
+# ════════════════════════════════════════
+# History CRUD API
+# ════════════════════════════════════════
+from history_store import list_items, get_item, save_item, update_item, delete_item
+
+@app.get("/api/history/{item_type}")
+async def history_list(item_type: str):
+    items = list_items(item_type)
+    return JSONResponse({"items": items})
+
+@app.get("/api/history/{item_type}/{item_id}")
+async def history_get(item_type: str, item_id: str):
+    item = get_item(item_type, item_id)
+    if not item:
+        return JSONResponse({"error": "Not found"}, status_code=404)
+    return JSONResponse(item)
+
+@app.post("/api/history/{item_type}")
+async def history_save(item_type: str, request: Request):
+    body = await request.json()
+    name = body.get("name", "")
+    data = body.get("data", {})
+    try:
+        meta = save_item(item_type, name, data)
+        return JSONResponse(meta)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+@app.patch("/api/history/{item_type}/{item_id}")
+async def history_rename(item_type: str, item_id: str, request: Request):
+    body = await request.json()
+    name = body.get("name", "")
+    if update_item(item_type, item_id, name):
+        return JSONResponse({"status": "ok"})
+    return JSONResponse({"error": "Not found"}, status_code=404)
+
+@app.delete("/api/history/{item_type}/{item_id}")
+async def history_delete(item_type: str, item_id: str):
+    if delete_item(item_type, item_id):
+        return JSONResponse({"status": "ok"})
+    return JSONResponse({"error": "Not found"}, status_code=404)
 
 
 @app.post("/api/stop-research")
 async def stop_research():
-    agent.stop_autonomous()
+    global _autonomous_agent
+    if _autonomous_agent:
+        _autonomous_agent.stop_autonomous()
     return JSONResponse({"status": "stopped"})
 
 
 @app.post("/api/autonomous")
 async def autonomous_research_endpoint(request: Request):
     """Autonomous research mode — SSE streaming progress."""
+    global _autonomous_agent
+
+    if not _autonomous_lock.acquire(blocking=False):
+        return JSONResponse({"error": "Research already running"}, status_code=409)
+
     body = await request.json()
     goal = body.get("goal", "")
     domain = body.get("domain", "mathematics")
@@ -140,46 +232,53 @@ async def autonomous_research_endpoint(request: Request):
     max_time = int(body.get("max_time", 600))
 
     if not goal:
+        _autonomous_lock.release()
         return JSONResponse({"error": "goal is required"}, status_code=400)
 
     def event_stream():
+        global _autonomous_agent
+        _autonomous_agent = MathResearchAgent()
         last_text = ""
         last_plan = ""
-        for phase, status_msg, plan_text, history, scratchpad, images in agent.autonomous_research(
-            goal, domain, max_iterations, max_time
-        ):
-            # Phase/progress update
-            yield f"data: {json.dumps({'type': 'phase', 'phase': phase, 'status': status_msg}, ensure_ascii=False)}\n\n"
+        try:
+            for phase, status_msg, plan_text, history, scratchpad, images in _autonomous_agent.autonomous_research(
+                goal, domain, max_iterations, max_time
+            ):
+                # Phase/progress update
+                yield f"data: {json.dumps({'type': 'phase', 'phase': phase, 'status': status_msg}, ensure_ascii=False)}\n\n"
 
-            # Plan update
-            if plan_text and plan_text != last_plan:
-                yield f"data: {json.dumps({'type': 'plan', 'content': plan_text}, ensure_ascii=False)}\n\n"
-                last_plan = plan_text
+                # Plan update
+                if plan_text and plan_text != last_plan:
+                    yield f"data: {json.dumps({'type': 'plan', 'content': plan_text}, ensure_ascii=False)}\n\n"
+                    last_plan = plan_text
 
-            # Text update
-            current_text = ""
-            if history:
-                for msg in reversed(history):
-                    if msg.get("role") == "assistant":
-                        current_text = msg.get("content", "")
-                        break
-            if current_text and current_text != last_text:
-                yield f"data: {json.dumps({'type': 'text', 'content': current_text}, ensure_ascii=False)}\n\n"
-                last_text = current_text
+                # Text update
+                current_text = ""
+                if history:
+                    for msg in reversed(history):
+                        if msg.get("role") == "assistant":
+                            current_text = msg.get("content", "")
+                            break
+                if current_text and current_text != last_text:
+                    yield f"data: {json.dumps({'type': 'text', 'content': current_text}, ensure_ascii=False)}\n\n"
+                    last_text = current_text
 
-            # Scratchpad
-            if scratchpad:
-                yield f"data: {json.dumps({'type': 'scratchpad', 'content': scratchpad}, ensure_ascii=False)}\n\n"
+                # Scratchpad
+                if scratchpad:
+                    yield f"data: {json.dumps({'type': 'scratchpad', 'content': scratchpad}, ensure_ascii=False)}\n\n"
 
-            # Images
-            for img_b64 in images:
-                yield f"data: {json.dumps({'type': 'image', 'content': img_b64})}\n\n"
+                # Images
+                for img_b64 in images:
+                    yield f"data: {json.dumps({'type': 'image', 'content': img_b64})}\n\n"
 
-        yield f"data: {json.dumps({'type': 'done', 'content': last_text}, ensure_ascii=False)}\n\n"
-        yield "data: [DONE]\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'content': last_text}, ensure_ascii=False)}\n\n"
+            yield "data: [DONE]\n\n"
+        finally:
+            _autonomous_agent = None
+            _autonomous_lock.release()
 
     return StreamingResponse(
-        event_stream(),
+        with_heartbeat(event_stream),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
@@ -947,17 +1046,13 @@ async def add_papers_to_network(request: Request):
 
 
 if __name__ == "__main__":
-    api_key = os.environ.get("API_KEY") or os.environ.get("ANTHROPIC_API_KEY", "")
-    model = os.environ.get("MODEL") or os.environ.get("ANTHROPIC_MODEL", "")
-    if not api_key or not model:
-        print("ERROR: Missing API_KEY or MODEL in .env")
+    if not API_KEY or not MODEL:
+        logger.error("Missing API_KEY or MODEL in .env")
         exit(1)
 
-    provider = os.environ.get("LLM_PROVIDER", "openai")
-    base_url = (os.environ.get("BASE_URL") or os.environ.get("ANTHROPIC_BASE_URL", "")).strip()
-    print(f"Provider: {provider}")
-    print(f"Model:    {model}")
-    print(f"Base URL: {base_url or '(default)'}")
-    print(f"\n  Open browser: http://127.0.0.1:7861\n")
+    logger.info(f"Provider: {LLM_PROVIDER}")
+    logger.info(f"Model:    {MODEL}")
+    logger.info(f"Base URL: {BASE_URL or '(default)'}")
+    logger.info(f"Open browser: http://{SERVER_HOST}:{SERVER_PORT}")
 
-    uvicorn.run(app, host="127.0.0.1", port=7861)
+    uvicorn.run(app, host=SERVER_HOST, port=SERVER_PORT)
