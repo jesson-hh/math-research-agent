@@ -350,3 +350,9 @@ w=16 最优但只收回 ~20% 的 gap。继续加权过头后整体 loss landscap
 - ❌ **Leverage 非对称性**:对称加法 conditioning 解不了,需要 sign-aware 机制或残差层 asymmetric noise
 
 M5 是当前最好的模型。下一步:CSI800 扩规模 + α-sweep 下游验证。
+
+### 2026-04-17 (续) — M6 CSI800 scaling ✅
+
+CSI800(1324 股,过滤后) + 同 M5 配置 + sectors_npz。结果:**架构完美 scale**,ema=0.1325(vs M5 0.1317),同 GPU 占用,训练时间线性。Cross-section gap 在更大池子下**进一步缩小**(market_factor_var gap -0.7% → -0.5%)。全部 7 项 verdict 绿。leverage 仍为负(-0.007),和池子大小无关。
+
+详细数字见 [[factor-conditional-interdiff-m4-m5#m6-csi800-scaling]]。

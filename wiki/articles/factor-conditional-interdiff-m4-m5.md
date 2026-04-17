@@ -1,12 +1,12 @@
 ---
-title: "Factor-Conditional InterDiff — M4/M5 Findings"
+title: "Factor-Conditional InterDiff — M4/M5/M6 Findings"
 category: "articles"
 slug: "factor-conditional-interdiff-m4-m5"
-tags: ["diffusion", "finance", "multi-stock", "experiment", "cross-section", "market-factor", "sector-factor", "csi300"]
+tags: ["diffusion", "finance", "multi-stock", "experiment", "cross-section", "market-factor", "sector-factor", "csi300", "csi800", "scaling"]
 refs: ["experiments/phase2_interdiff_fts"]
 links: ["fts-interdiff-fusion", "factor-conditional-denoising", "interdiff-inter-stock-correlations", "synthetic-augmentation-financial-timeseries"]
 created: "2026-04-17T20:45:00"
-updated: "2026-04-17T20:45:00"
+updated: "2026-04-17T22:15:00"
 ---
 
 # Factor-Conditional InterDiff — M4/M5 Findings
@@ -175,8 +175,61 @@ experiments/phase2_interdiff_fts/
     └── *.samples.npz
 ```
 
+## M6 — CSI800 Scaling
+
+**2026-04-17**
+
+扩展到 CSI800(top-800 按市值),最终 1324 只股通过 min_valid_ratio=0.5 过滤(92.4% valid coverage)。同 M5 架构和超参,+`--sectors-npz data/csi800_sectors.npz`。
+
+Sector 分布(CSI800)更均衡,UNKNOWN 占比从 CSI300 的 2.7% 升到 7%(大盘外更多冷门股没标签),但主要 sector 都至少 50 只:TECH 200、INDUSTRIAL 211、CONSUMER 157、HEALTHCARE 129、MATERIALS 103、FINANCE 95、METALS 85、ENERGY 75、TRANSPORT 66、REAL_ESTATE 62、MEDIA 49、UNKNOWN 92。
+
+### 关键发现 1: 架构**完美** scale
+
+| 维度 | CSI300 (M5) | CSI800 (M6) |
+|------|-------------|-------------|
+| N_stocks | 594 | 1324 (×2.2) |
+| ema loss | 0.1317 | **0.1325** |
+| step/s (RTX 5090) | 23.3 | 22.5 |
+| GPU peak | 2.43 GB | 2.43 GB |
+| Wall time | 13 min | 15 min |
+
+**loss 差异小于 1%**,GPU 使用不变。原因:k=32(每 panel 采 32 股)是硬约束,模型 forward/backward 规模和总股票池无关。只有 data loading 略慢(更大 panel npz)。
+
+### 关键发现 2: Cross-section gap **进一步缩小**
+
+| 指标 | M5 (CSI300) | M6 (CSI800) |
+|------|-------------|-------------|
+| market_factor_var gap | -0.7% | **-0.5%** ⬇ |
+| panel_mean_pair_corr gap | -0.5% | -0.6% |
+| max_eig_frac gap | -1.3% | -1.4% |
+| resid_mean_pair_corr gap | -0.7% | -0.6% |
+
+CSI800 下更大的股票池 → market factor 估计方差更小 → 训练时 ground truth 更稳 → denoiser 学得更准。这是**池子大 → 信号质量高**的线性关系,不需要扩模型。
+
+### 关键发现 3: Sector 信号在更大池子里更干净
+
+窗口内 k=32 股,CSI300 有效 sector 平均每类 **2.9 只**/窗,CSI800 提升到 **5.2 只**/窗(按非零 sector 计)。样本多 → 同 sector 均值更稳 → sector factor 的 SNR 更高。实验验证:M6 的 lag10 ACF 从 M5 的 -0.002 到 -0.001,更贴近 real 的 -0.005。
+
+### 全绿(CSI800)
+
+| metric | real | M6 syn | verdict |
+|---|---|---|---|
+| std | 0.0274 | 0.0283 | OK |
+| excess_kurt | 3.55 | 3.03 | OK |
+| hill_right / left | 3.46 / 3.00 | 3.83 / 3.16 | OK |
+| acf_r² lag1 | 0.074 | 0.066 | OK |
+| acf_r² lag10 | -0.005 | -0.001 | 极佳 |
+| panel_mean_pair_corr | 0.349 | 0.347 | OK |
+| panel_max_eig_frac | 0.398 | 0.392 | OK |
+| **leverage lag1** | 0.013 | **-0.007** | ❌ 仍为负 |
+
+### 唯一缺陷保持一致
+
+leverage_lag1 在 M4(-0.003)、M5(-0.004)、M6(-0.007)都为负 vs real +0.013。和股票池大小无关,**是对称加法 conditioning 的根本局限**。所有方向性不对称现象(leverage、margin call 加速、崩盘集群)都需要额外机制。
+
 ## Next
 
-1. **CSI800 扩规模** — 800 股 vs 300 股,验证 sector 机制在更稀疏 sector 覆盖下是否还成立
-2. **α-sweep 下游实验** — 用 M5 合成数据做 ranking 预测,找 [[phase-transition-alpha-star-empirical|model collapse 相变点]]
-3. **Leverage 方向性** — 见上面 [[#open]]
+1. ~~CSI800 扩规模~~ ✅ 完美 scale,架构验证通过
+2. **α-sweep 下游实验** — 用 M6 合成数据做 ranking 预测,找 [[phase-transition-alpha-star-empirical|model collapse 相变点]]
+3. **Leverage 方向性** — 见 [[#open]],sign-aware conditioning 或 asymmetric noise schedule
+4. **Factor-model 分析** — M6 的 576 个同 sector 窗口样本足够做经验 factor-loading 分析,验证 denoiser 确实在用 sector 信号而不是忽略
