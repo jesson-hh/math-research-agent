@@ -101,6 +101,9 @@ def parse_args():
                     help="number of volatility regimes; 0=off")
     ap.add_argument("--aux-market-weight", type=float, default=0.0,
                     help="weight on market-factor MSE (common mode) in training loss")
+    ap.add_argument("--sectors-npz", default=None,
+                    help="path to sector labels sidecar npz (e.g. data/csi300_sectors.npz); "
+                         "enables per-stock sector factor conditioning")
     return ap.parse_args()
 
 
@@ -144,6 +147,7 @@ def main():
         time_range=("2015-01-05", args.train_end),
         regime_window=args.regime_window,
         n_regimes=args.n_regimes,
+        sectors_npz=args.sectors_npz,
     )
     print(f"[train] dataset info: {ds.info()}")
     use_regimes = ds.regime_spec is not None
@@ -180,23 +184,41 @@ def main():
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.steps)
 
     def _split_batch(b):
-        """Unpack batch -> (panel, regime_cond_or_None, mkt_cond_or_None)."""
-        if isinstance(b, (list, tuple)):
-            if len(b) == 3:
-                return b[0].to(device), b[1].to(device), b[2].to(device)
-            elif len(b) == 2:
-                if b[1].dtype == torch.long:
-                    return b[0].to(device), b[1].to(device), None
-                else:
-                    return b[0].to(device), None, b[1].to(device)
-        return b.to(device), None, None
+        """
+        Unpack a batch into a dict with keys: x, regime, mkt, sector.
+        Each value is a tensor on `device` or None.
+
+        The PanelWindowDataset yields tuples whose order is always:
+          (window, [regime_labels], [mkt], [sector])
+        where regime_labels has int64 dtype and mkt/sector are float32.
+        We split by dtype so the result is unambiguous for any combo.
+        """
+        out = {"x": None, "regime": None, "mkt": None, "sector": None}
+        if not isinstance(b, (list, tuple)):
+            out["x"] = b.to(device)
+            return out
+        out["x"] = b[0].to(device)
+        rest = [t.to(device) for t in b[1:]]
+        regime_items = [t for t in rest if t.dtype == torch.long]
+        float_items = [t for t in rest if t.dtype != torch.long]
+        if regime_items:
+            out["regime"] = regime_items[0]
+        if len(float_items) >= 1:
+            out["mkt"] = float_items[0]
+        if len(float_items) >= 2:
+            out["sector"] = float_items[1]
+        return out
 
     if device == "cuda":
         try:
             it_pre = iter(loader)
-            preflight, pre_cond, pre_mkt = _split_batch(next(it_pre))
+            pb = _split_batch(next(it_pre))
             torch.cuda.reset_peak_memory_stats()
-            loss_pre = diff.training_loss(model, preflight, cond=pre_cond, mkt_cond=pre_mkt, aux_market_weight=args.aux_market_weight)
+            loss_pre = diff.training_loss(
+                model, pb["x"],
+                cond=pb["regime"], mkt_cond=pb["mkt"], sector_cond=pb["sector"],
+                aux_market_weight=args.aux_market_weight,
+            )
             loss_pre.backward()
             opt.zero_grad(set_to_none=True)
             torch.cuda.synchronize()
@@ -208,7 +230,7 @@ def main():
                     f"preflight peak {preflight_peak:.2f}GB > cap {args.max_mem_gb}GB; "
                     f"reduce --batch / --k / --d-model / --n-blocks"
                 )
-            del preflight, loss_pre, it_pre, pre_cond, pre_mkt
+            del pb, loss_pre, it_pre
             gc.collect()
             torch.cuda.empty_cache()
             torch.cuda.reset_peak_memory_stats()
@@ -229,9 +251,13 @@ def main():
         except StopIteration:
             it = iter(loader)
             batch = next(it)
-        batch, cond, mkt = _split_batch(batch)
+        bd = _split_batch(batch)
 
-        loss = diff.training_loss(model, batch, cond=cond, mkt_cond=mkt, aux_market_weight=args.aux_market_weight)
+        loss = diff.training_loss(
+            model, bd["x"],
+            cond=bd["regime"], mkt_cond=bd["mkt"], sector_cond=bd["sector"],
+            aux_market_weight=args.aux_market_weight,
+        )
         opt.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -279,6 +305,7 @@ def main():
                 "stats": {"mean": ds.mean, "std": ds.std},
                 "ds_info": ds.info(),
                 "mkt_cond": True,
+                "sector_cond": ds.sector_labels is not None,
             }
             if use_regimes:
                 save_obj["regime_spec"] = ds.regime_spec.to_dict()

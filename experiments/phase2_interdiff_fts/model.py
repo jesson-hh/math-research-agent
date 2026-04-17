@@ -142,6 +142,12 @@ class InterDenoiser(nn.Module):
             nn.GELU(),
             nn.Linear(d_model, d_model),
         )
+        # Per-stock sector factor conditioning: (B, N, L) -> (B, N, L, d_model)
+        self.sector_proj = nn.Sequential(
+            nn.Linear(1, d_model),
+            nn.GELU(),
+            nn.Linear(d_model, d_model),
+        )
 
     def forward(
         self,
@@ -149,6 +155,7 @@ class InterDenoiser(nn.Module):
         t: torch.Tensor,
         cond: torch.Tensor | None = None,
         mkt_cond: torch.Tensor | None = None,
+        sector_cond: torch.Tensor | None = None,
     ) -> torch.Tensor:
         B, N, L, C = x.shape
         h = self.in_proj(x)
@@ -161,6 +168,11 @@ class InterDenoiser(nn.Module):
             # mkt_cond: (B, L) -> (B, 1, L, 1) -> project -> (B, 1, L, d) -> broadcast
             me = self.mkt_proj(mkt_cond[:, None, :, None])  # (B, 1, L, d_model)
             h = h + me  # broadcast across N stocks
+
+        if sector_cond is not None:
+            # sector_cond: (B, N, L) — per-stock sector factor
+            se = self.sector_proj(sector_cond[:, :, :, None])  # (B, N, L, d_model)
+            h = h + se
 
         te = sinusoidal_time_embedding(t, self.d_model)
         te = self.time_mlp(te)[:, None, None, :]

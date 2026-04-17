@@ -78,6 +78,7 @@ class PanelWindowDataset(IterableDataset):
         regime_window: int = 0,
         n_regimes: int = 0,
         regime_spec: RegimeSpec | None = None,
+        sectors_npz: str | Path | None = None,
     ):
         d = np.load(panel_npz, allow_pickle=True)
         panel = d["panel"]
@@ -139,6 +140,43 @@ class PanelWindowDataset(IterableDataset):
             self.regime_spec = None
             self.regime_labels = None
 
+        # Sector labels: (N_stocks,) int, aligned to self.codes
+        self.sector_labels = None
+        if sectors_npz is not None:
+            sd = np.load(sectors_npz, allow_pickle=True)
+            sector_codes = sd["codes"]
+            sec_map = dict(zip(sector_codes.tolist(), sd["sector_labels"].tolist()))
+            self.sector_labels = np.array(
+                [sec_map.get(c, 0) for c in self.codes.tolist()],
+                dtype=np.int64,
+            )
+
+    def _compute_sector_factor(self, window: np.ndarray, stock_sectors: np.ndarray,
+                                 mkt: np.ndarray) -> np.ndarray:
+        """
+        For each stock in the window, compute the equal-weight mean of
+        log_ret across OTHER stocks in the window that share its sector.
+        Falls back to market factor if the stock is alone in its sector.
+
+        window:        (k, L, C)
+        stock_sectors: (k,) int
+        mkt:           (L,) — market factor, used as fallback
+        returns:       (k, L) float32 sector factor signal per stock
+        """
+        k = window.shape[0]
+        L = window.shape[1]
+        log_ret = window[:, :, 0]  # (k, L)
+        out = np.zeros((k, L), dtype=np.float32)
+        for i in range(k):
+            same = stock_sectors == stock_sectors[i]
+            same[i] = False  # exclude self (avoid trivial copy)
+            n_same = int(same.sum())
+            if n_same > 0:
+                out[i] = log_ret[same].mean(axis=0)
+            else:
+                out[i] = mkt  # fallback
+        return out
+
     def __iter__(self):
         rng = self._rng
         L = self.length
@@ -152,11 +190,21 @@ class PanelWindowDataset(IterableDataset):
             window = self.returns[picks, s : s + L, :]
             # Market factor: equal-weight mean of log_ret across sampled stocks
             mkt = window[:, :, 0].mean(axis=0).astype(np.float32)  # (L,)
+
+            # Per-stock sector factor (if sector labels available)
+            sec = None
+            if self.sector_labels is not None:
+                stock_sectors = self.sector_labels[picks]
+                sec = self._compute_sector_factor(window, stock_sectors, mkt)  # (k, L)
+
+            parts = [torch.from_numpy(window)]
             if self.regime_labels is not None:
                 lab = self.regime_labels[picks, s : s + L]
-                yield torch.from_numpy(window), torch.from_numpy(lab), torch.from_numpy(mkt)
-            else:
-                yield torch.from_numpy(window), torch.from_numpy(mkt)
+                parts.append(torch.from_numpy(lab))
+            parts.append(torch.from_numpy(mkt))
+            if sec is not None:
+                parts.append(torch.from_numpy(sec))
+            yield tuple(parts)
 
     def info(self) -> dict:
         return {

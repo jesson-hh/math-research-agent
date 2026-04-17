@@ -29,7 +29,9 @@ def parse_args():
     ap.add_argument("--out", default=None)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--panel", default="data/csi300_2015_2024.npz",
-                    help="source panel for borrowing regime label sequences (M1)")
+                    help="source panel for borrowing regime/mkt/sector sequences")
+    ap.add_argument("--sectors-npz", default="data/csi300_sectors.npz",
+                    help="sector labels sidecar; used if ckpt has sector_cond=True")
     return ap.parse_args()
 
 
@@ -48,7 +50,8 @@ def main():
         print(f"[sample] regime: K={regime_spec.n_regimes} window={regime_spec.window}")
 
     use_mkt_cond = ck.get("mkt_cond", False)
-    print(f"[sample] mkt_cond={use_mkt_cond}")
+    use_sector_cond = ck.get("sector_cond", False)
+    print(f"[sample] mkt_cond={use_mkt_cond}  sector_cond={use_sector_cond}")
 
     model = InterDenoiser(
         n_channels=4,
@@ -69,8 +72,24 @@ def main():
     C = 4
 
     # --- prepare conditioning sources ---
+    def _unpack_item(item):
+        """Same convention as train._split_batch: split by dtype."""
+        out = {"regime": None, "mkt": None, "sector": None}
+        if not isinstance(item, (list, tuple)):
+            return out
+        rest = list(item[1:])
+        for t in rest:
+            if t.dtype == torch.long and out["regime"] is None:
+                out["regime"] = t
+            elif t.dtype != torch.long:
+                if out["mkt"] is None:
+                    out["mkt"] = t
+                elif out["sector"] is None:
+                    out["sector"] = t
+        return out
+
     ds_source = None
-    if regime_spec is not None or use_mkt_cond:
+    if regime_spec is not None or use_mkt_cond or use_sector_cond:
         ds_source = PanelWindowDataset(
             panel_npz=args.panel,
             length=L,
@@ -80,6 +99,7 @@ def main():
             time_range=("2015-01-05", cfg.get("train_end", "2022-12-31")),
             regime_window=regime_spec.window if regime_spec else 0,
             n_regimes=regime_spec.n_regimes if regime_spec else 0,
+            sectors_npz=args.sectors_npz if use_sector_cond else None,
         )
         source_iter = iter(ds_source)
 
@@ -87,31 +107,27 @@ def main():
     for bi in range(args.n_batches):
         cond_batch = None
         mkt_batch = None
+        sector_batch = None
 
         if ds_source is not None:
-            cond_list = []
-            mkt_list = []
+            cond_list, mkt_list, sec_list = [], [], []
             for _ in range(args.batch):
-                item = next(source_iter)
-                if isinstance(item, (list, tuple)):
-                    if len(item) == 3:
-                        _, lab, mkt = item
-                        cond_list.append(lab)
-                        mkt_list.append(mkt)
-                    elif len(item) == 2:
-                        if item[1].dtype == torch.long:
-                            cond_list.append(item[1])
-                        else:
-                            mkt_list.append(item[1])
-                else:
-                    pass
+                parts = _unpack_item(next(source_iter))
+                if parts["regime"] is not None:
+                    cond_list.append(parts["regime"])
+                if parts["mkt"] is not None:
+                    mkt_list.append(parts["mkt"])
+                if parts["sector"] is not None:
+                    sec_list.append(parts["sector"])
             if cond_list:
                 cond_batch = torch.stack(cond_list, dim=0).to(device)
             if mkt_list and use_mkt_cond:
                 mkt_batch = torch.stack(mkt_list, dim=0).to(device)
+            if sec_list and use_sector_cond:
+                sector_batch = torch.stack(sec_list, dim=0).to(device)
 
         x = diff.sample(model, shape=(args.batch, K, L, C),
-                        cond=cond_batch, mkt_cond=mkt_batch)
+                        cond=cond_batch, mkt_cond=mkt_batch, sector_cond=sector_batch)
         all_samples.append(x.cpu().numpy())
         print(f"[sample] batch {bi+1}/{args.n_batches}")
 

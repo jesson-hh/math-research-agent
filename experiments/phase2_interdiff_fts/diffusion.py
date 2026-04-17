@@ -55,13 +55,14 @@ class GaussianDiffusion:
         x0: torch.Tensor,
         cond: torch.Tensor | None = None,
         mkt_cond: torch.Tensor | None = None,
+        sector_cond: torch.Tensor | None = None,
         aux_market_weight: float = 0.0,
     ) -> torch.Tensor:
         B = x0.shape[0]
         t = torch.randint(0, self.T, (B,), device=x0.device)
         noise = torch.randn_like(x0)
         xt = self.q_sample(x0, t, noise)
-        eps = model(xt, t, cond=cond, mkt_cond=mkt_cond)
+        eps = model(xt, t, cond=cond, mkt_cond=mkt_cond, sector_cond=sector_cond)
         base = F.mse_loss(eps, noise)
         if aux_market_weight <= 0.0:
             return base
@@ -83,6 +84,7 @@ class GaussianDiffusion:
         clip_range: float = 5.0,
         cond: torch.Tensor | None = None,
         mkt_cond: torch.Tensor | None = None,
+        sector_cond: torch.Tensor | None = None,
     ) -> torch.Tensor:
         x = torch.randn(shape, device=self.device)
         iters = range(self.T - 1, -1, -1)
@@ -94,7 +96,7 @@ class GaussianDiffusion:
                 pass
         for i in iters:
             t = torch.full((shape[0],), i, device=self.device, dtype=torch.long)
-            eps = model(x, t, cond=cond, mkt_cond=mkt_cond)
+            eps = model(x, t, cond=cond, mkt_cond=mkt_cond, sector_cond=sector_cond)
             beta = self.betas[i]
             alpha = self.alphas[i]
             ac = self.alpha_cum[i]
