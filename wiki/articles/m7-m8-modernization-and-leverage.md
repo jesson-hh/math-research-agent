@@ -175,5 +175,5 @@ experiments/phase2_interdiff_fts/
 
 ## Next
 
-- [[alpha-sweep-csi800-m6]] — downstream IC sweep on model-collapse phase transition
-- If α-sweep shows collapse, revisit leverage via explicit aux loss (Option A) or two-stage GARCH (Option C)
+- ~~[[alpha-sweep-csi800-m6]] — downstream IC sweep on model-collapse phase transition~~ ✅ **Done**: No collapse observed; α=0.9 gives best IC; leverage gap does not seem to hurt downstream.
+- Leverage fix no longer blocking (downstream robust to it). Can be revisited if a future stronger predictor shows leverage-sensitive gap.
