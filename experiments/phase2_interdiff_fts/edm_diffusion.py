@@ -60,6 +60,7 @@ class StudentTEDM:
         aux_lev_weight: float = 0.0,
         aux_lev_target: float = 0.0,
         aux_lev_low_sigma_only: bool = True,
+        aux_lev_mode: str = "mse",
     ):
         self.sigma_min = float(sigma_min)
         self.sigma_max = float(sigma_max)
@@ -72,6 +73,9 @@ class StudentTEDM:
         self.aux_lev_weight = float(aux_lev_weight)
         self.aux_lev_target = float(aux_lev_target)
         self.aux_lev_low_sigma_only = bool(aux_lev_low_sigma_only)
+        assert aux_lev_mode in ("mse", "sign", "hinge"), \
+            f"aux_lev_mode must be mse|sign|hinge, got {aux_lev_mode!r}"
+        self.aux_lev_mode = aux_lev_mode
         # For convenience
         self._log_sigma_min = math.log(self.sigma_min)
         self._log_sigma_max = math.log(self.sigma_max)
@@ -202,7 +206,19 @@ class StudentTEDM:
             den = a_c.std() * b_c.std() + 1e-8
             lev_pred = num / den
 
-            aux_loss = (lev_pred - self.aux_lev_target) ** 2
+            if self.aux_lev_mode == "mse":
+                # Symmetric MSE pull toward target. Risk: overshoot, can fight
+                # main loss when batch noise pushes lev > target.
+                aux_loss = (lev_pred - self.aux_lev_target) ** 2
+            elif self.aux_lev_mode == "sign":
+                # One-sided penalty: only when lev < 0. Constant gradient
+                # magnitude so it doesn't chase per-batch noise. Zeros out
+                # once leverage hits zero -> no overshoot.
+                aux_loss = F.relu(-lev_pred)
+            elif self.aux_lev_mode == "hinge":
+                # One-sided penalty: only when lev < target. Constant grad
+                # magnitude, zeros at target.
+                aux_loss = F.relu(self.aux_lev_target - lev_pred)
             return main_loss + self.aux_lev_weight * aux_loss
         return main_loss
 

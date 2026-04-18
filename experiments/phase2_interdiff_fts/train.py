@@ -151,6 +151,10 @@ def parse_args():
                     help="target leverage value (real CSI800 = +0.013).")
     ap.add_argument("--aux-lev-low-sigma-only", action="store_true", default=True,
                     help="apply aux leverage loss only when sigma < sigma_data (low-noise batch elements)")
+    ap.add_argument("--aux-lev-mode", choices=["mse", "sign", "hinge"], default="mse",
+                    help="aux loss form: mse=(lev-target)^2 (symmetric, can overshoot), "
+                         "sign=ReLU(-lev) (one-sided, only penalizes negative leverage), "
+                         "hinge=ReLU(target-lev) (one-sided to target).")
     return ap.parse_args()
 
 
@@ -241,6 +245,7 @@ def main():
             aux_lev_weight=args.aux_lev_weight,
             aux_lev_target=args.aux_lev_target,
             aux_lev_low_sigma_only=args.aux_lev_low_sigma_only,
+            aux_lev_mode=args.aux_lev_mode,
         )
         print(f"[train] diffusion = t-EDM  nu={args.edm_nu}  "
               f"sigma range [{args.edm_sigma_min}, {args.edm_sigma_max}]  "
