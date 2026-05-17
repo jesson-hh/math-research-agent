@@ -68,3 +68,20 @@ def test_empty_body_rejected(tmp_vault: Path):
     store = VaultStore(tmp_vault)
     with pytest.raises(ValueError, match="body is required"):
         store.save_entry(title="t", category="articles", body="")
+
+
+@pytest.mark.parametrize("bad_slug", [
+    "../escape",
+    "..\\escape",
+    "foo/../bar",
+    "foo\\..\\bar",
+    "..",
+    "foo\x00null",
+    "with/slash",
+    "with\\backslash",
+])
+def test_slug_path_traversal_rejected(tmp_vault: Path, bad_slug: str):
+    """A caller-supplied slug must not be able to escape the vault root."""
+    store = VaultStore(tmp_vault)
+    with pytest.raises(ValueError, match="Invalid slug"):
+        store.save_entry(title="x", category="articles", body="b", slug=bad_slug)

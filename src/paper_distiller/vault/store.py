@@ -161,6 +161,8 @@ class VaultStore:
 
     def _entry_path(self, category: str, slug: str) -> Path:
         self._validate_category(category)
+        if not slug or "/" in slug or "\\" in slug or ".." in slug or "\x00" in slug:
+            raise ValueError(f"Invalid slug: {slug!r}")
         return self.root / category / f"{slug}.md"
 
     def save_entry(
