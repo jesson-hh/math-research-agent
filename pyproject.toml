@@ -28,6 +28,7 @@ dev = ["pytest>=8.0", "pytest-mock>=3.12", "ruff>=0.5"]
 
 [project.scripts]
 paper-distiller = "paper_distiller.cli:main"
+paper-distiller-qa = "paper_distiller.qa.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/jesson-hh/paper-distiller"
