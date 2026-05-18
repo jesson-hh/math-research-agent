@@ -87,6 +87,12 @@ CLI flags override env vars where applicable (`--model`, `--provider`).
 
 The 3 distillation prompts live as plain markdown at `src/paper_distiller/prompts/{filter,article,survey}.md`. Edit them directly to change the tone, structure, or language of generated notes — no Python changes needed.
 
+## Optional companion: semantic search via vault-mcp
+
+paper-distiller does NOT ship its own semantic-search engine for your vault. To search the vault by meaning (not keywords) from Claude Code, pair it with [**vault-mcp**](https://github.com/robbiemu/vault-mcp) — a standalone MCP server purpose-built for markdown vaults, with live sync and multi-provider embedding support.
+
+See [docs/vault-mcp-recommendation.md](docs/vault-mcp-recommendation.md) for setup and rationale.
+
 ## LLM provider examples
 
 | Provider | `PD_BASE_URL` | `PD_MODEL` |
@@ -103,22 +109,25 @@ The default category schema (articles / techniques / directions / open-problems 
 
 ## Status
 
-**v0.1.0 — alpha.** Single-pass L2 search-and-distill works end-to-end. Not yet on PyPI; install from GitHub.
+**v0.3.0 — alpha.** Two-source (arxiv + Semantic Scholar) search-and-distill with PDF fallback works end-to-end. Not yet on PyPI; install from GitHub.
 
-### Planned for v0.2
+### Shipped
 
-- Multi-round autonomous research loop (the "L3" mode from the design doc)
-- Per-vault `paper-distiller.toml` for custom category schemas
-- Semantic Scholar as a second source for open-access PDFs
-- LEANN-backed semantic crosslink retrieval (replaces the pre-load index when vaults grow past ~500 entries)
-- arxiv-id-based dedup (so re-distilling the same paper updates the existing entry instead of creating a sibling)
-- Per-paper full-text length threshold (current truthy check accepts very short text as "full-pdf")
+- **v0.1.0** — L2 single-pass search-and-distill against arxiv; LLM filter + ranker; PyMuPDF-based extraction; Obsidian-compatible markdown output.
+- **v0.2.0** — arxiv-id-based dedup (prevents sibling articles for the same paper under different slugs); restored 500-char full-pdf threshold.
+- **v0.3.0** — Semantic Scholar as second paper source (`--source {arxiv,ss,both}`, default both); PDF fallback chain (when arxiv's PDF download fails, try SS's `openAccessPdf`); DOI-based dedup.
 
-### Known limitations in v0.1.0
+### Future roadmap
+
+- **v0.4** — *deferred*. We explored shipping our own semantic-search MCP server; concluded the right answer is to recommend [vault-mcp](https://github.com/robbiemu/vault-mcp) instead (see [docs/vault-mcp-recommendation.md](docs/vault-mcp-recommendation.md)).
+- **v0.5** — multi-round autonomous research loop (the "L3" mode from the original design doc): given a high-level goal, agent plans search iterations, follows citations, identifies gaps, runs to convergence.
+- **v0.6** — extend paper-distiller's sources beyond arxiv + Semantic Scholar. Likely candidate: integrate [OpenCLI](https://github.com/jackwener/OpenCLI) to pull from logged-in browser sessions (ACM Digital Library, IEEE Xplore, lab homepages, Chinese platforms like 知乎/B站). Useful for venue-only papers and discussion context around papers.
+- **Later / on-demand** — per-vault `paper-distiller.toml` for custom category schemas; LEANN-backed in-pipeline crosslink retrieval (useful only when vault grows past ~500 entries).
+
+### Known limitations
 
 - arxiv.org occasionally returns 503 / 429; paper-distiller retries 3× then exits with a friendly error (use `--verbose` for the traceback).
-- Dedup uses the paper title's slug; if an LLM rewrites the title differently between runs, a duplicate article may be created.
-- The 4-byte 500-char "full-pdf vs abstract-only" threshold is currently a truthy check (any non-empty `full_text` counts as full-pdf). Real PDFs are tens of KB so this is rarely a problem in practice.
+- The "full-pdf vs abstract-only" threshold (500 chars) is conservative; PyMuPDF rarely returns less, but scanned-only PDFs do correctly fall back to abstract-only mode.
 
 ## Contributing
 
