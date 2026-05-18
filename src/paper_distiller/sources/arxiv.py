@@ -75,14 +75,29 @@ def search(query: str, max_results: int = 30) -> list[ArxivPaper]:
     return papers
 
 
-def download_pdf(paper: ArxivPaper, dest_dir: Path, timeout: float = 60.0) -> Path:
-    """Download paper PDF to dest_dir / <arxiv_id>.pdf. Returns the path."""
+def download_pdf_from_url(url: str, dest_dir: Path, filename: str,
+                           timeout: float = 60.0) -> Path:
+    """Stream a PDF from a URL into dest_dir/filename. Returns the saved path."""
     dest_dir = Path(dest_dir)
     dest_dir.mkdir(parents=True, exist_ok=True)
-    dest = dest_dir / f"{paper.arxiv_id}.pdf"
-    with httpx.stream("GET", paper.pdf_url, timeout=timeout, follow_redirects=True) as r:
+    dest = dest_dir / filename
+    with httpx.stream("GET", url, timeout=timeout, follow_redirects=True) as r:
         r.raise_for_status()
         with dest.open("wb") as f:
             for chunk in r.iter_bytes():
                 f.write(chunk)
     return dest
+
+
+def download_pdf(paper: Paper, dest_dir: Path, timeout: float = 60.0) -> Path:
+    """Download paper PDF to dest_dir/<paper.paper_id>.pdf. Returns the path.
+
+    Thin wrapper retained for backward compat — callers should prefer
+    download_pdf_from_url when they need explicit URL/filename control.
+    """
+    return download_pdf_from_url(
+        url=paper.pdf_url,
+        dest_dir=dest_dir,
+        filename=f"{paper.paper_id}.pdf",
+        timeout=timeout,
+    )
