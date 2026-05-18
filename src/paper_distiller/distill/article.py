@@ -89,8 +89,17 @@ def distill(
     body = parsed.get("body", "").strip()
     tags = parsed.get("tags", []) or []
     refs = parsed.get("refs", []) or []
-    if f"arxiv:{paper.arxiv_id}" not in refs:
-        refs.insert(0, f"arxiv:{paper.arxiv_id}")
+    # Inject canonical ref(s). Priority: arxiv -> doi -> ss_paper_id.
+    canonical_refs: list[str] = []
+    if paper.arxiv_id:
+        canonical_refs.append(f"arxiv:{paper.arxiv_id}")
+    if paper.doi:
+        canonical_refs.append(f"doi:{paper.doi}")
+    if not canonical_refs and paper.ss_paper_id:
+        canonical_refs.append(f"ss:{paper.ss_paper_id}")
+    # Preserve order: canonical refs first (arxiv before doi before ss), then any
+    # extras the LLM provided that weren't already there.
+    refs = canonical_refs + [r for r in refs if r not in canonical_refs]
     if not body:
         raise LLMError("article distillation returned empty body")
 
