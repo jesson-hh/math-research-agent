@@ -2,6 +2,17 @@
 
 All notable changes documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.5.1] — 2026-05-19
+
+First PyPI release. No code changes beyond engineering setup; the v0.5.0 feature set is unchanged.
+
+### Engineering
+- **GitHub Actions CI** — `pytest` on Python 3.10 / 3.11 / 3.12 (Ubuntu), triggered on push to main and on pull request.
+- **GitHub Actions Release workflow** — on `v*` tag push (or manual dispatch): builds wheel + sdist, publishes to PyPI via OIDC trusted publishing (no token), attaches artifacts to a GitHub Release with auto-generated notes.
+- **`docs/ARCHITECTURE.md`** — full module map, L2 single-pass and L3 multi-round data flow, the seven stop reasons explained, prompt-template locations, cost-accounting math.
+- **README rewrite** — `paper-distiller-qa` now mentioned throughout (What it does / Quick start / How it works / CLI reference / Customizing prompts); PyPI install is now the primary path; status section reflects v0.5.x; badges switched to dynamic PyPI versions.
+- **`pyproject.toml`** project URLs point at the renamed `github.com/jesson-hh/paper-distiller` repo.
+
 ## [0.5.0] — 2026-05-18
 
 ### Added
