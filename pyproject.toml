@@ -24,7 +24,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "pytest-mock>=3.12", "ruff>=0.5"]
+dev = ["pytest>=8.0", "pytest-mock>=3.12", "pytest-asyncio>=0.23", "ruff>=0.5"]
 
 [project.scripts]
 paper-distiller = "paper_distiller.cli:main"
@@ -44,3 +44,4 @@ packages = ["src/paper_distiller"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+asyncio_mode = "auto"
