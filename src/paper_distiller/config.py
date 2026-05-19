@@ -44,6 +44,12 @@ class Config:
     qa_resume_session_id: str | None = None
     qa_question: str | None = None
 
+    # --- Research mode (v1.1) ---
+    research_max_papers: int = 30
+    research_max_cost_cny: float = 30.0
+    research_max_duration_sec: int = 4 * 3600   # 4 hours
+    research_resume_session_id: str | None = None
+
 
 def _require(name: str) -> str:
     v = os.getenv(name)
@@ -149,4 +155,50 @@ def load_config_qa(
         qa_interactive=interactive,
         qa_resume_session_id=resume_session_id,
         qa_question=question,
+    )
+
+
+def load_config_research(
+    vault_path,
+    question: str,
+    max_papers: int = 30,
+    max_cost_cny: float = 30.0,
+    max_duration_sec: int = 14400,
+    source: str = "both",
+    resume_session_id: str | None = None,
+    verbose: bool = False,
+    dry_run: bool = False,
+    model_override: str | None = None,
+    provider_override: str | None = None,
+) -> Config:
+    """Build a Config for paper-distiller-chat research."""
+    if not question or not question.strip():
+        raise ValueError("question is required")
+    if source not in ("arxiv", "ss", "both"):
+        raise ValueError(f"source must be one of arxiv/ss/both (got {source!r})")
+    if max_papers < 1:
+        raise ValueError("max_papers must be >= 1")
+    if max_cost_cny <= 0:
+        raise ValueError("max_cost_cny must be > 0")
+    if max_duration_sec < 60:
+        raise ValueError("max_duration_sec must be >= 60")
+    return Config(
+        vault_path=Path(vault_path),
+        topic=None, author=None,
+        top_n=2, pool=20, force=False, dry_run=dry_run, verbose=verbose,
+        api_key=_require("PD_API_KEY"),
+        base_url=_require("PD_BASE_URL"),
+        model=model_override or _require("PD_MODEL"),
+        provider_name=provider_override or os.getenv("PD_PROVIDER_NAME", "unspecified"),
+        pdf_timeout_sec=int(os.getenv("PD_PDF_TIMEOUT", "60")),
+        min_papers_for_survey=int(os.getenv("PD_MIN_SURVEY", "2")),
+        source=source,
+        ss_api_key=os.getenv("PD_SS_API_KEY") or None,
+        qa_max_rounds=3, qa_max_articles=max_papers, qa_max_cost_cny=max_cost_cny,
+        qa_confidence_threshold=8, qa_per_round=2, qa_interactive=False,
+        qa_resume_session_id=None, qa_question=question,
+        research_max_papers=max_papers,
+        research_max_cost_cny=max_cost_cny,
+        research_max_duration_sec=max_duration_sec,
+        research_resume_session_id=resume_session_id,
     )
