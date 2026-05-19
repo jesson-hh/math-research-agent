@@ -90,6 +90,56 @@ def lookup_by_doi(doi: str, api_key: str | None = None) -> Paper | None:
     return _lookup(f"DOI:{doi}", api_key)
 
 
+def paper_refs(arxiv_id_or_doi: str, max_results: int = 30,
+               api_key: str | None = None) -> list[Paper]:
+    """Fetch references + cited-by for a given paper ID. Returns combined list of Paper.
+
+    arxiv_id_or_doi: e.g. "2501.00001" or "10.1234/foo". Prefix-aware: if the
+    caller already passed "arxiv:..." or "doi:..." it is kept as-is.
+    """
+    headers = {"x-api-key": api_key} if api_key else {}
+    key = arxiv_id_or_doi
+    if "/" in key and not key.startswith(("arxiv:", "doi:")):
+        key = f"doi:{key}"
+    elif "." in key and not key.startswith(("arxiv:", "doi:")):
+        key = f"arxiv:{key}"
+
+    results = []
+    for endpoint in (f"paper/{key}/references", f"paper/{key}/citations"):
+        url = f"https://api.semanticscholar.org/graph/v1/{endpoint}"
+        params = {
+            "limit": max_results // 2,
+            "fields": "title,abstract,authors,year,externalIds,openAccessPdf",
+        }
+        try:
+            r = httpx.get(url, params=params, headers=headers, timeout=30.0)
+            r.raise_for_status()
+        except httpx.HTTPError:
+            continue
+        for item in r.json().get("data", []):
+            inner = item.get("citedPaper") or item.get("citingPaper") or item
+            if not inner:
+                continue
+            ext = inner.get("externalIds") or {}
+            arxiv_id = ext.get("ArXiv")
+            doi = ext.get("DOI")
+            if not arxiv_id and not doi:
+                continue
+            results.append(Paper(
+                source="ss",
+                paper_id=inner.get("paperId", ""),
+                arxiv_id=arxiv_id,
+                doi=doi,
+                title=inner.get("title") or "",
+                authors=[a.get("name", "") for a in inner.get("authors", [])],
+                abstract=inner.get("abstract") or "",
+                pdf_url=(inner.get("openAccessPdf") or {}).get("url", ""),
+                published=str(inner.get("year") or ""),
+                categories=[],
+            ))
+    return results
+
+
 def _lookup(id_with_prefix: str, api_key: str | None) -> Paper | None:
     url = f"{_BASE_URL}/paper/{id_with_prefix}"
     params = {"fields": _FIELDS}
