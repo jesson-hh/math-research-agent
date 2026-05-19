@@ -88,3 +88,20 @@ async def test_orchestrator_propagates_agent_error():
         await Orchestrator(DAG([a]), ctx).run()
     assert exc_info.value.agent_name == "a"
     assert "boom" in str(exc_info.value.__cause__)
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_with_default_on_status_propagates_agent_error():
+    """Regression: with Context's default on_status (no kwargs handler),
+    an agent failure must still raise AgentFailed — NOT TypeError from
+    the callback choking on the error= kwarg."""
+    a = _StubAgent("a", raises=RuntimeError("boom"))
+    # Construct Context WITHOUT overriding on_status — uses the default lambda
+    ctx = Context(
+        cfg=MagicMock(), llm=MagicMock(), vault=MagicMock(),
+        shared={},
+    )
+    with pytest.raises(AgentFailed) as exc_info:
+        await Orchestrator(DAG([a]), ctx).run()
+    assert exc_info.value.agent_name == "a"
+    assert "boom" in str(exc_info.value.__cause__)

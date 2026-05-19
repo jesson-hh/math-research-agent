@@ -22,7 +22,7 @@ class Context:
     llm: Any                       # paper_distiller.llm.openai_compatible.LLMClient
     vault: Any                     # paper_distiller.vault.store.VaultStore
     shared: dict = field(default_factory=dict)
-    on_status: Callable[[str, Status], None] = lambda name, status: None
+    on_status: Callable[..., None] = lambda *a, **kw: None
 
 
 class Agent(Protocol):
