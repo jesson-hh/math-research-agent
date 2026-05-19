@@ -322,7 +322,13 @@ def run(cfg: Config) -> dict:
             )
         survey_slug = saved["slug"]
 
-    state.is_done = True
+    # Transient stops (user_quit, error: *) leave the session resumable.
+    # Terminal stops (budgets, llm_done, llm_brake, no_candidates) mark it done.
+    non_terminal = (
+        state.stop_reason == "user_quit"
+        or state.stop_reason.startswith("error:")
+    )
+    state.is_done = not non_terminal
     _update_cost(state, llm)
     write_state(cfg.vault_path, state)
 

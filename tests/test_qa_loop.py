@@ -206,3 +206,29 @@ def test_loop_persists_state_each_round(tmp_path, mocker):
     assert data["question"] == cfg.qa_question
     assert data["rounds_completed"] >= 1
     assert data["stop_reason"] == "max_rounds"
+    assert data["is_done"] is True
+
+
+def test_loop_error_session_stays_resumable(tmp_path, mocker):
+    """Transient errors (e.g. 429) leave is_done=False so --resume can retry."""
+    cfg = _config(tmp_path, max_rounds=2)
+    cfg.vault_path.mkdir()
+
+    reflection_seq = [
+        {"is_done": False, "confidence": 4, "what_we_know": "...",
+         "what_is_missing": "...", "next_query": "q1",
+         "next_query_rationale": "...", "suggest_stop": False},
+    ]
+    _common_mocks(mocker, reflection_seq)
+    # Override gather_candidates to simulate an upstream 429
+    mocker.patch(
+        "paper_distiller.qa.loop.gather_candidates",
+        side_effect=RuntimeError("simulated 429"),
+    )
+
+    summary = run(cfg)
+    assert summary["stop_reason"].startswith("error: search failed")
+    state_path = (cfg.vault_path / ".paper_distiller" / "qa-sessions"
+                  / summary["session_id"] / "state.json")
+    data = json.loads(state_path.read_text(encoding="utf-8"))
+    assert data["is_done"] is False
