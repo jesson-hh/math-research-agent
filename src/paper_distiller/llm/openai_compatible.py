@@ -38,6 +38,23 @@ class ToolCallResponse:
     finish_reason: str = ""
 
 
+@dataclass
+class StreamChunk:
+    """A single chunk in a streamed tool-calling response.
+
+    A streamed response is a sequence of these chunks. Text content arrives via
+    text_delta; tool_call info arrives across multiple chunks — the first chunk
+    for a given call carries tool_call_id, then subsequent chunks fill in
+    tool_name_delta and tool_arg_delta. The final chunk's finish_reason is set.
+    """
+
+    text_delta: str = ""
+    tool_call_id: str | None = None
+    tool_name_delta: str = ""
+    tool_arg_delta: str = ""
+    finish_reason: str = ""
+
+
 class LLMClient:
     def __init__(
         self,
@@ -165,6 +182,86 @@ class LLMClient:
             tool_calls=tool_calls,
             finish_reason=choice.get("finish_reason", "") or "",
         )
+
+    def complete_with_tools_stream(
+        self,
+        messages: list,
+        tools: list,
+        temperature: float = 0.5,
+    ):
+        """Stream a tool-calling completion. Yields StreamChunk objects.
+
+        Aliyun Bailian (and other OpenAI-compatible providers) emit SSE lines
+        prefixed `data: ` containing JSON. The terminating sentinel is
+        `data: [DONE]`. Token usage may arrive in the final non-DONE event.
+        """
+        body = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": temperature,
+            "tools": tools,
+            "stream": True,
+        }
+        seen_call_ids: dict[int, str] = {}
+        try:
+            with self._client.stream(
+                "POST",
+                f"{self.base_url}/chat/completions",
+                headers={"Authorization": f"Bearer {self.api_key}"},
+                json=body,
+            ) as r:
+                r.raise_for_status()
+                for line in r.iter_lines():
+                    if not line:
+                        continue
+                    if not line.startswith("data: "):
+                        continue
+                    payload = line[len("data: "):]
+                    if payload == "[DONE]":
+                        break
+                    try:
+                        data = json.loads(payload)
+                    except json.JSONDecodeError:
+                        continue
+                    if "usage" in data and data["usage"]:
+                        self.total_tokens_in += data["usage"].get(
+                            "prompt_tokens", 0
+                        )
+                        self.total_tokens_out += data["usage"].get(
+                            "completion_tokens", 0
+                        )
+                    choices = data.get("choices") or []
+                    if not choices:
+                        continue
+                    choice = choices[0]
+                    delta = choice.get("delta") or {}
+                    finish_reason = choice.get("finish_reason") or ""
+
+                    text = delta.get("content") or ""
+                    if text:
+                        yield StreamChunk(text_delta=text)
+
+                    for tc_delta in delta.get("tool_calls") or []:
+                        idx = tc_delta.get("index", 0)
+                        new_id: str | None = None
+                        if "id" in tc_delta and tc_delta["id"]:
+                            if idx not in seen_call_ids:
+                                seen_call_ids[idx] = tc_delta["id"]
+                                new_id = tc_delta["id"]
+                        fn = tc_delta.get("function") or {}
+                        name_delta = fn.get("name") or ""
+                        arg_delta = fn.get("arguments") or ""
+                        if new_id or name_delta or arg_delta:
+                            yield StreamChunk(
+                                tool_call_id=new_id,
+                                tool_name_delta=name_delta,
+                                tool_arg_delta=arg_delta,
+                            )
+
+                    if finish_reason:
+                        yield StreamChunk(finish_reason=finish_reason)
+        except httpx.HTTPError as e:
+            raise LLMError(f"LLM stream failed: {e}") from e
 
     def __del__(self):
         try:
