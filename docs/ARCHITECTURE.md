@@ -1,190 +1,324 @@
-# Architecture
+# Architecture (v1.0)
 
-How paper-distiller is laid out and how data flows through it. Read this if you want to extend it, customize the prompts, or understand a failure.
+How paper-distiller is laid out and how data flows through it. Read this if you want to extend it, add a new agent, customize the prompts, or understand a failure.
 
-## Two CLIs
+## One CLI, three modes + REPL
 
-paper-distiller ships two console entry points that share the same underlying primitives:
+paper-distiller v1.0 ships a single console script: `paper-distiller-chat`. It has three one-shot subcommands plus an interactive REPL when invoked without a subcommand:
 
-| CLI | Mode | When to use |
+| Mode | Invocation | Use case |
 |---|---|---|
-| `paper-distiller` | **L2 single-pass** — one search → distill N papers → optional survey | You already know the topic and just want N papers added to the vault |
-| `paper-distiller-qa` | **L3 multi-round loop** — reflect → search → distill → repeat until done | You have a research *question* and want the tool to autonomously plan multiple search rounds and synthesize a cited answer |
+| **REPL** | `paper-distiller-chat --vault X` | Interactive — slash commands or natural language |
+| **distill** | `paper-distiller-chat distill --topic X --n N` | Single-pass batch: distill N papers on a topic |
+| **ask** | `paper-distiller-chat ask --question Y` | Multi-round QA loop: agent plans search across rounds and writes a cited answer |
+| **resume** | `paper-distiller-chat resume --session-id <sid>` | Continue a paused/errored QA session |
 
-Both write into the same Obsidian-compatible vault layout (`articles/`, `surveys/`).
+All four share the same underlying machinery: an async DAG of sub-agents executed by a single orchestrator with a live status table.
 
 ## Package layout
 
 ```
 src/paper_distiller/
-├── __init__.py                 __version__ = "0.5.0"
-├── config.py                   Config dataclass + load_config()/load_config_qa()
-├── cli.py                      `paper-distiller` argparse entry
-├── pipeline.py                 The L2 primitives: gather_candidates, rank, fetch_with_fallback
-├── llm/
-│   └── openai_compatible.py    LLMClient — OpenAI-compatible HTTP, JSON response_format, token accounting
+├── __init__.py                __version__ = "1.0.0"
+├── config.py                  Config dataclass + load_config / load_config_qa
+├── agents/                    The v1.0 sub-agent framework + concrete agents
+│   ├── base.py                Agent Protocol, Context, Status
+│   ├── dag.py                 DAG class — topology validation + topo_levels
+│   ├── orchestrator.py        asyncio executor + AgentFailed
+│   ├── fanout.py              FanoutAgent protocol
+│   ├── renderer.py            ConsoleRenderer (rich live table)
+│   ├── searchers.py           ArxivSearcher + SemanticScholarSearcher
+│   ├── curation.py            CandidateMerger + CandidateRanker
+│   ├── dedup.py               CandidateDedup (QA-only in-session dedup)
+│   ├── processor.py           PaperProcessor (fanout) + _DistillOne
+│   ├── writer.py              VaultWriter + SurveyComposer
+│   ├── reflector.py           ProgressReflector (QA round-start LLM call)
+│   ├── synthesizer.py         AnswerSynthesizer (QA final-answer LLM call)
+│   ├── router.py              IntentRouter (REPL NL → command JSON)
+│   └── prompts/
+│       └── route.md           Intent-routing prompt
+├── chat/                      The user-facing CLI + REPL
+│   ├── cli.py                 argparse entry, subcommand dispatch, REPL launch
+│   ├── qa_runner.py           QA-loop driver — orchestrates rounds + state persistence
+│   └── repl/
+│       ├── commands.py        Slash-command parser + KNOWN_COMMANDS set
+│       ├── helpers.py         Read-only commands (vault/sessions/provider/agents/show/help)
+│       └── loop.py            REPL class — input loop, dispatch, NL routing
+├── llm/openai_compatible.py   LLMClient (OpenAI-compatible HTTP, JSON mode, token accounting)
 ├── sources/
-│   ├── arxiv.py                arxiv API search + PDF download (uses the `arxiv` PyPI package)
-│   └── semantic_scholar.py     Semantic Scholar API search + openAccessPdf lookup
+│   ├── arxiv.py               arxiv API search + PDF download
+│   └── semantic_scholar.py    SS API search + openAccessPdf lookup
 ├── extract/
-│   └── pymupdf_extractor.py    PDF → plain text via PyMuPDF
+│   └── pymupdf_extractor.py   PDF → plain text via PyMuPDF
 ├── distill/
-│   ├── filter.py               LLM ranker — given M candidates + topic, return top N
-│   ├── article.py              LLM paper distillation — produces an ArticleResult
-│   └── survey.py               LLM cluster survey — composes multi-article survey doc
-├── prompts/                    L2 prompts (filter.md, article.md, survey.md)
+│   ├── article.py             distill_article — LLM paper distillation
+│   ├── filter.py              rank — LLM candidate ranker
+│   └── survey.py              compose — LLM cluster-survey composition
+├── prompts/                   v0.3-era distill prompts (filter / article / survey)
 ├── vault/
-│   ├── schema.py               Category list + Paper / ArticleResult dataclasses
-│   ├── store.py                VaultStore — saves entries, dedups by arxiv-id / DOI / slug
-│   └── crosslink.py            Loads existing vault index for [[wikilink]] injection during distill
-└── qa/                         v0.5 additions — multi-round loop
-    ├── cli.py                  `paper-distiller-qa` argparse entry
-    ├── loop.py                 The orchestrator state machine
-    ├── reflection.py           One LLM reflection call (judge progress + propose next query)
-    ├── answer.py               One LLM answer-synthesis call (compose final cited answer)
-    ├── state.py                SessionState + RoundRecord + disk persistence
-    └── prompts/                QA prompts (reflect.md, answer.md)
+│   ├── schema.py              Category list + Paper / ArticleResult dataclasses
+│   ├── store.py               VaultStore — save_entry + find_by_arxiv_id/doi dedup
+│   └── crosslink.py           WikiIndex — feeds existing slugs to the distill prompt
+└── qa/
+    ├── state.py               SessionState + RoundRecord + disk persistence
+    ├── reflection.py          One LLM call: round-start reflection
+    ├── answer.py              One LLM call: final answer synthesis
+    └── prompts/
+        ├── reflect.md         Reflection prompt
+        └── answer.md          Answer-synthesis prompt
 ```
 
-The `Paper` dataclass in `vault/schema.py` is the cross-source unification point — every source returns the same shape (`arxiv_id`, `doi`, `ss_paper_id`, `title`, `abstract`, etc.), so downstream code never needs to special-case arxiv vs Semantic Scholar.
+The `Paper` dataclass in `vault/schema.py` is the cross-source unification point — every source returns the same shape (`arxiv_id`, `doi`, `ss_paper_id`, etc.), so downstream code never has to special-case the source.
 
-## L2 flow — `paper-distiller`
+## The agent framework
 
-```
-                            (1)            (2)            (3)              (4)              (5)
-  user gives --topic  →  arxiv + SS  →  LLM filter   →  PDF fetch     →  LLM distill   →  vault.save_entry
-                          (~30 hits)     (→ top N)       (with fallback)   (per paper)        (articles/<slug>.md)
-                                                                                              │
-                                                                                              ↓
-                                                                                          (6) LLM survey
-                                                                                              if N >= PD_MIN_SURVEY
-                                                                                              (surveys/<slug>.md)
-```
+### Agent contract
 
-Step-by-step:
+```python
+class Agent(Protocol):
+    name: str
+    deps: list[str]                  # other agent names this depends on
 
-1. **`gather_candidates(cfg)`** — calls `sources/arxiv.py` and/or `sources/semantic_scholar.py` per `cfg.source` (`arxiv` / `ss` / `both`). For `both`, merges results and dedups by `arxiv_id`, then `doi` (arxiv source wins on tie).
-2. **`rank(candidates, topic, top_n, llm)`** — one LLM call with the `filter.md` prompt; returns indices of the top-N most relevant. Cheap (a few hundred tokens).
-3. **`fetch_with_fallback(paper, cfg, tmpdir)`** — tries the paper's primary PDF URL. If it 4xx/timeouts AND the paper has an `arxiv_id` or `doi`, queries Semantic Scholar for `openAccessPdf` and retries. If still no PDF and abstract length ≥ 500 chars, falls back to abstract-only mode. If even the abstract is missing, raises.
-4. **`pymupdf_extractor.extract(pdf_path)`** — plain text. PyMuPDF is fast (50ms for typical paper).
-5. **`distill_article(paper, full_text, wiki_index, llm)`** — one LLM call with the `article.md` prompt. The `wiki_index` (from `crosslink.load_index`) is a flat list of existing slugs + titles, injected into the prompt so the LLM can cross-reference them via `[[wikilink]]`. Output is an `ArticleResult` dataclass.
-6. **`store.save_entry(category="articles", ...)`** — writes `<vault>/articles/<slug>.md` with YAML frontmatter + body. Slug collisions resolved by appending random hex.
-7. **Survey** (optional) — if `len(articles) >= cfg.min_papers_for_survey`, one final LLM call with `survey.md` produces a session survey under `<vault>/surveys/`.
-
-**Dedup logic** (L2 + L3 share this):
-
-- Before saving an article, `VaultStore` runs `find_by_arxiv_id`, then `find_by_doi`. If either hits, the existing file is reused (no new write).
-- The L3 loop additionally tracks `articles_seen_ids` in memory to avoid re-distilling within the same session.
-
-## L3 flow — `paper-distiller-qa`
-
-A state machine. Each round runs steps 1-8; the loop terminates via one of 7 stop reasons.
-
-```
-                           ┌─────────────────────────────────────────┐
-                           │  qa.loop.run(cfg)                       │
-                           │                                         │
-   user gives --question → │  while True:                            │
-                           │    1. reflect (LLM)         ─────┐      │
-                           │    2. termination checks  →      │      │
-                           │    3. interactive checkpoint     │      │  on stop:
-                           │    4. search (gather_candidates) │ ←────┤  → synthesize answer (LLM)
-                           │    5. dedup vs seen              │      │  → save to surveys/qa-…md
-                           │    6. rank (LLM)                 │      │  → write state.json (final)
-                           │    7. distill loop (N × LLM)     │      │
-                           │    8. write state.json           │      │
-                           │    9. check budgets    ──────────┘      │
-                           └─────────────────────────────────────────┘
+    async def run(self, ctx: Context) -> dict: ...
+    # Returns a dict that gets merged into ctx.shared for downstream agents.
 ```
 
-### The 7 stop reasons
+### Context
 
-| Stop reason | Trigger | `is_done`? |
+```python
+@dataclass
+class Context:
+    cfg: Config
+    llm: LLMClient
+    vault: VaultStore
+    shared: dict                     # mutable inter-agent state
+    on_status: Callable              # callback for status events
+```
+
+`shared` accumulates as agents run:
+- after `arxiv-searcher`: `shared["candidates_arxiv"] = [Paper, ...]`
+- after `candidate-merger`: `shared["candidates"] = [Paper, ...]`
+- after `candidate-dedup`: `shared["candidates"]` filtered to non-seen papers
+- after `candidate-ranker`: `shared["ranked"] = [Paper, ...][:N]`
+- after `paper-processor` fanout: `shared["articles"] = [ArticleResult, ...]`
+- in QA mode: `shared["qa_state"] = SessionState` (set by qa_runner before each Orchestrator.run)
+- in QA mode: `shared["reflection"]: dict` (after `progress-reflector`)
+- in QA mode: `shared["answer_survey_slug"]` (after `answer-synthesizer`)
+
+### DAG + Orchestrator
+
+```python
+class DAG:
+    def __init__(self, agents: list[Agent]):
+        # validates: no duplicate names, no missing deps, no cycles
+    def topo_levels(self) -> list[list[str]]:
+        # returns groups: [[level0], [level1], ...] where each group runs concurrently
+
+class Orchestrator:
+    async def run(self) -> dict:
+        for name in self.dag.agents:
+            self.ctx.on_status(name, Status.QUEUED)
+        for level in self.dag.topo_levels():
+            await asyncio.gather(*(self._run_one(name) for name in level))
+        return self.ctx.shared
+```
+
+`_run_one` handles regular agents AND `FanoutAgent`s (agents with `expand()` instead of `run()` that produce N sub-agents at runtime). The orchestrator awaits each topological level fully before starting the next.
+
+### ConsoleRenderer
+
+`ConsoleRenderer.on_status` is the `Context.on_status` callback. It accumulates row state (queued / running / done / failed with elapsed times). `ConsoleRenderer.build_table()` returns a fresh `rich.table.Table` that the chat CLI wraps with `rich.live.Live` for ~10 Hz auto-refresh during execution.
+
+## Three DAG shapes
+
+paper-distiller composes the 11 agents into three DAG shapes, one per mode.
+
+### Single-pass DAG (`distill`)
+
+```
+arxiv-searcher  ss-searcher      ← Phase 1 (parallel, deps=[])
+       └────┬────┘
+       candidate-merger
+              │
+       candidate-dedup            ← QA-only filter; passthrough in single-pass
+              │
+       candidate-ranker (LLM)
+              │
+       paper-processor (fanout)   ← Phase 3 (×N parallel sub-agents)
+              │
+       vault-writer
+              │
+       survey-composer (LLM)      ← optional, only if N >= min_papers_for_survey
+```
+
+Each `paper-processor` fan-out instance does `fetch_with_fallback` + PyMuPDF extract + `distill_article` LLM call. Per-paper LLMError is swallowed (the failed paper is dropped; other papers continue).
+
+### Reflection DAG (`ask`, per round)
+
+```
+progress-reflector (LLM)
+```
+
+A single-node DAG. Reads `qa_state.articles_distilled` + `qa_state.history` (prior queries) and asks the LLM:
+- is the answer complete enough to stop? (`is_done`, `confidence`)
+- if not, what should we search next? (`next_query`, `next_query_rationale`)
+- diminishing returns flag? (`suggest_stop`)
+
+Returns this JSON in `ctx.shared["reflection"]`. The `qa_runner.py` driver inspects it and decides whether to continue.
+
+### Distillation DAG (`ask`, per round, if continuing)
+
+Same shape as the single-pass DAG, with `next_query` set in `ctx.shared` and `qa_state` available for `candidate-dedup` to filter out already-seen papers. No `survey-composer` (the final synthesis is `answer-synthesizer` after the loop terminates).
+
+### Synthesis DAG (`ask`, once after loop ends)
+
+```
+answer-synthesizer (LLM)
+```
+
+Wraps `qa.answer.synthesize` — composes the final cited answer + appends an audit trail markdown table summarizing per-round queries, confidence, cost. Writes the result to `<vault>/surveys/qa-<slug>-<date>.md`.
+
+## QA loop driver (`chat/qa_runner.py`)
+
+The Orchestrator runs one DAG once — it has no native loop concept. So the multi-round QA flow is driven by `chat/qa_runner.py::run_qa_loop`, which calls `Orchestrator.run()` once per phase:
+
+```python
+async def _arun_qa_loop(cfg):
+    state = SessionState(...) or read_state(...)
+    with Live(renderer.build_table(), ...):
+        while True:
+            # 1. Reflection DAG
+            ctx = Context(cfg, llm, vault, {"qa_state": state}, renderer.on_status)
+            await Orchestrator(reflection_dag, ctx).run()
+            reflection = ctx.shared["reflection"]
+            state.last_reflection = reflection
+
+            # 2. Check stop conditions
+            if state.rounds_completed >= cfg.qa_max_rounds: break  # max_rounds
+            if reflection["is_done"] and confidence >= threshold: break  # llm_done
+            if reflection["suggest_stop"]: break  # llm_brake
+            if not reflection["next_query"]: break  # no_candidates
+
+            # 3. Distillation DAG
+            ctx = fresh_ctx_with_shared({"qa_state": state, "next_query": ...})
+            await Orchestrator(distillation_dag, ctx).run()
+
+            # 4. Process round's results, update state, persist
+            new_articles = [a for a in ctx.shared["articles"] if a.slug not in seen]
+            if not new_articles and not ctx.shared["candidates"]: break  # no_candidates
+            state.articles_distilled.extend(new_articles)
+            # populate seen_ids from successful articles' refs
+            state.history.append(RoundRecord(...))
+            state.rounds_completed += 1
+            write_state(cfg.vault_path, state)
+
+            # 5. Budget caps
+            if len(state.articles_distilled) >= cfg.qa_max_articles: break  # max_articles
+            if state.cost_cny >= cfg.qa_max_cost_cny: break  # max_cost
+
+    # 6. Synthesis (if any articles)
+    if state.articles_distilled:
+        await Orchestrator(synthesis_dag, fresh_ctx).run()
+
+    # 7. is_done semantics
+    state.is_done = state.stop_reason not in ("user_quit",) and not state.stop_reason.startswith("error:")
+    write_state(cfg.vault_path, state)
+    return state
+```
+
+### Seven stop reasons
+
+| Reason | Trigger | `is_done`? |
 |---|---|---|
 | `max_rounds` | `state.rounds_completed >= cfg.qa_max_rounds` | yes |
-| `llm_done` | reflection returns `is_done=True` AND `confidence >= cfg.qa_confidence_threshold` | yes |
-| `llm_brake` | reflection returns `suggest_stop=True` (diminishing-returns judgement) | yes |
-| `no_candidates` | search returned 0 candidates OR all candidates dedup against already-seen | yes |
-| `max_articles` | total articles distilled across all rounds reaches `cfg.qa_max_articles` | yes |
-| `max_cost` | accumulated `state.cost_cny >= cfg.qa_max_cost_cny` | yes |
-| `user_quit` | Ctrl+C OR `--interactive` user answers `n`/`q` | **no** (resumable) |
-| `error: <details>` | any uncaught exception in search/rank/distill | **no** (resumable) |
+| `llm_done` | `reflection.is_done == True` AND `confidence >= threshold` | yes |
+| `llm_brake` | `reflection.suggest_stop == True` (diminishing-returns judgement) | yes |
+| `no_candidates` | Search + dedup yielded nothing new, OR `next_query` was empty | yes |
+| `max_articles` | Total articles distilled hit `cfg.qa_max_articles` | yes |
+| `max_cost` | Accumulated `state.cost_cny >= cfg.qa_max_cost_cny` | yes |
+| `user_quit` | Ctrl+C OR REPL interactive `n` | **no** (resumable) |
+| `error: <details>` | Uncaught exception in reflection or distillation DAG | **no** (resumable) |
 
-`is_done=False` stops are resumable via `--resume <session-id>`. Done stops cannot be resumed (raises `ValueError`).
+`is_done = False` makes the session resumable via `paper-distiller-chat resume <sid>`. Done sessions cannot be resumed (raises ValueError).
 
-### Reflection prompt (`qa/prompts/reflect.md`)
+## REPL (`chat/repl/loop.py`)
 
-Inputs to the LLM each round:
-- The original `question`
-- Summary of `articles_summary` distilled so far (one line each: `[[slug]] title`)
-- `prior_queries` already searched (to avoid duplicate searches)
-- `round_num` and `max_rounds` (so the LLM can pace itself)
+When the user types `paper-distiller-chat --vault X` (no subcommand), the chat CLI launches the REPL.
 
-LLM returns JSON with:
-```json
-{
-  "is_done": false,
-  "confidence": 4,
-  "what_we_know": "...",
-  "what_is_missing": "...",
-  "next_query": "diffusion models long-horizon time series 2024",
-  "next_query_rationale": "...",
-  "suggest_stop": false
-}
+```python
+class REPL:
+    def dispatch_one(self, line) -> str | None:
+        if line.startswith("/"):
+            return self._dispatch_slash(line)
+        return self._dispatch_natural_language(line)
 ```
 
-Temperature 0.3 (deterministic-ish). Retries once on malformed JSON, then raises `ReflectionError`.
+**Slash commands** dispatch directly:
+- Read-only commands (`/vault`, `/sessions`, `/provider`, `/agents`, `/show`, `/help`) call into `chat/repl/helpers.py` — pure utility, no LLM.
+- Action commands (`/distill`, `/ask`, `/resume`) build synthetic argv and call `chat/cli.py::main` — reuses the one-shot subcommand handlers.
+- `/quit` returns a "QUIT" sentinel that the input loop respects.
 
-### Answer synthesis (`qa/prompts/answer.md`)
+**Natural-language input** goes through `IntentRouter`:
+1. One LLM call (`agents/prompts/route.md`) classifies into one of 4 commands (`distill` / `ask` / `resume` / `show`) with extracted params + missing-params list + confidence.
+2. REPL prints the proposal:
+   ```
+   [intent-router] Intent: ask  | confidence 9
+     question: 扩散在金融时序的最新进展
+   Missing: max_rounds, per_round, max_cost_cny
+   Apply defaults (max_rounds=3, per_round=2, max_cost_cny=5.0) and run? [Y/n]
+   ```
+3. On `Y`, REPL applies `_AGENT_DEFAULTS` for missing params, builds argv, dispatches.
+4. `show` is special-cased — routes directly to `handle_show(vault_path, slug)` because `cli.main` has no `show` subcommand.
 
-After the loop terminates, if `articles_distilled` is non-empty:
-1. Concatenate up to 12K chars of each article's body as context
-2. Single LLM call (temperature 0.5) producing JSON `{title, body, tags, cited_slugs}`
-3. Body is **scrubbed** of `[[wikilinks]]` whose slug isn't in `valid_slugs` (the LLM sometimes invents slugs; we preserve display text but unlink)
-4. Wrap with cited-articles table + audit trail (per-round query + LLM confidence) → write to `<vault>/surveys/qa-<slug>-<YYYYMMDD>.md`
+The input loop uses `prompt_toolkit.PromptSession` with `WordCompleter` for tab-completion of slash commands and arrow-key history.
 
-### State persistence
+## Cost accounting
 
-After each round, `qa/state.py` writes:
+`LLMClient` maintains `total_tokens_in` and `total_tokens_out` accumulators. After every round, `qa_runner._update_cost(state, llm)` rolls them into `state.cost_cny` using qwen-plus pricing:
+
+```python
+_PRICE_IN_CNY_PER_M = 2.1
+_PRICE_OUT_CNY_PER_M = 12.7
+state.cost_cny = (tokens_in * 2.1 + tokens_out * 12.7) / 1_000_000
+```
+
+This is for the cost circuit breaker (`--max-cost-cny`); it is **not** billing-accurate and does not account for provider-specific overhead.
+
+## State persistence
+
+QA sessions persist their `SessionState` after every round:
 
 ```
 <vault>/.paper_distiller/qa-sessions/<session_id>/state.json
 ```
 
-Contains the full SessionState — `question`, `articles_distilled` (full bodies inline so resume doesn't need to re-distill), `articles_seen_ids` (as sorted JSON list, restored as Python set), `history` (per-round records), `last_reflection`, `tokens_in/out_total`, `cost_cny`, `stop_reason`, `is_done`.
+`state.json` is a JSON-serialized `SessionState` with all rounds, articles distilled inline (so resume doesn't have to refetch), seen IDs, cost, and stop reason. The `articles_seen_ids` set is stored as a sorted list and restored as a Python set on read.
 
-A `--resume <session-id>` invocation re-reads this file, sets `state = existing`, and re-enters the while loop. Already-distilled articles are not re-fetched (their slugs are already in `articles_seen_ids`).
+`paper-distiller-chat resume --session-id <sid>` reads this file, sets `cfg.qa_resume_session_id`, and re-enters the loop at the next round. Already-distilled articles are not re-fetched.
 
-## Cost accounting
+## LLM client contract
 
-Aliyun Bailian `qwen-plus` / `qwen3.5-plus` pricing (rough, CNY per 1M tokens):
-- Input: ¥2.1/M
-- Output: ¥12.7/M
+`llm/openai_compatible.py::LLMClient` is a minimal HTTP wrapper:
 
-The LLMClient maintains `total_tokens_in` and `total_tokens_out` accumulators. After every round, `qa.loop._update_cost(state, llm)` rolls them into `state.cost_cny`. This is purely for the cost circuit breaker (`--max-cost-cny`); it is NOT billing-accurate and does not account for provider-specific overhead.
+- `complete(messages, temperature, response_format=None)` — one method
+- `response_format="json"` enables strict-JSON mode (provider-side `response_format: {type: json_object}`)
+- Accumulates `total_tokens_in/out` across calls
+- Raises `LLMError` on HTTP/timeout/auth failures (caught upstream by `PaperProcessor`)
+
+Any OpenAI-compatible endpoint works: Aliyun Bailian (recommended), DeepSeek, OpenRouter, local Ollama.
 
 ## Prompts as plain markdown
 
-All 5 prompts live as plain markdown files:
+All 6 LLM prompts live as plain `.md` files:
 
 - `src/paper_distiller/prompts/filter.md` (rank candidates)
 - `src/paper_distiller/prompts/article.md` (distill one paper)
 - `src/paper_distiller/prompts/survey.md` (compose multi-article survey)
-- `src/paper_distiller/qa/prompts/reflect.md` (judge loop progress)
+- `src/paper_distiller/qa/prompts/reflect.md` (judge QA loop progress)
 - `src/paper_distiller/qa/prompts/answer.md` (synthesize final answer)
+- `src/paper_distiller/agents/prompts/route.md` (REPL intent classification)
 
-Edit them directly to change tone, structure, or output language. No Python changes needed — they use Python `str.format()` interpolation with named parameters like `{question}`, `{articles_full}`, etc.
-
-## LLM client contract
-
-The `LLMClient` in `llm/openai_compatible.py` is a minimal HTTP wrapper:
-
-- One `complete(messages, temperature, response_format=None)` method
-- `response_format="json"` enables strict-JSON mode (provider-side `response_format: {type: json_object}`)
-- Accumulates `total_tokens_in/out` across calls
-- Raises `LLMError` on HTTP/timeout/auth failures (caught upstream — distillation errors don't crash the loop)
-
-Any OpenAI-compatible endpoint works: Aliyun Bailian (recommended), DeepSeek, OpenRouter, local Ollama. See README for example configurations.
+Edit them directly to change tone, structure, or output language. No Python changes needed — they use Python `str.format()` interpolation with named parameters like `{question}`, `{user_input}`, etc.
 
 ## Vault format
 
@@ -193,10 +327,19 @@ paper-distiller writes pure Obsidian-flavored markdown — no custom format:
 - YAML frontmatter at the top (`title`, `tags`, `slug`, `arxiv_id`, `doi`, `published`, `depth`)
 - Body in markdown
 - Cross-references via `[[wikilink]]` or `[[wikilink|Display]]`
-- Categories are subdirectory names (`articles/`, `surveys/`, `techniques/`, `directions/`, `open-problems/`, `authors/`)
+- Categories are subdirectory names
 
-The QA session state lives in `<vault>/.paper_distiller/qa-sessions/<sid>/state.json` — a hidden subdirectory that Obsidian ignores by default.
+The chat REPL's `/sessions` command and the resume flow both rely on `.paper_distiller/qa-sessions/<sid>/state.json` — a hidden directory Obsidian ignores by default.
 
 ## Testing
 
-78 tests across `tests/` (run `pytest -q`). All LLM calls are mocked (`unittest.mock` or `pytest-mock`); no real API calls in the test suite. Real-API smoke tests are documented in CHANGELOG entries; not part of CI.
+168 tests across `tests/` (run `pytest -q`):
+
+- `tests/agents/` — per-agent unit tests (each agent + framework primitives)
+- `tests/chat/` — REPL parsing, helpers, CLI dispatch, qa_runner
+- `tests/integration/` — end-to-end distill + ask flows with all subsystems mocked
+- `tests/test_*.py` (root) — primitives: arxiv source, SS source, distill, config, vault, LLM, smoke
+
+All LLM calls are mocked (`unittest.mock` / `pytest-mock`); no real API calls in CI. Real-API smoke tests are documented in CHANGELOG entries; not part of CI.
+
+CI matrix: Python 3.10 / 3.11 / 3.12 on Ubuntu, triggered on push to main and on every PR.

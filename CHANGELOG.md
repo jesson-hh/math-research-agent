@@ -2,6 +2,56 @@
 
 All notable changes documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.0.0] — 2026-05-19
+
+**BREAKING CHANGE.** Major rewrite around a chat-first interface backed by an async sub-agent framework. The old `paper-distiller` (single-pass) and `paper-distiller-qa` (multi-round) console scripts are **removed** and replaced by a single `paper-distiller-chat` entry point with three subcommands (`distill` / `ask` / `resume`) and an interactive REPL when invoked without a subcommand.
+
+### Added
+- **`paper-distiller-chat` console script** with three one-shot subcommands and an interactive REPL:
+  - `distill --topic X --n N` — single-pass mode (replaces v0.5 `paper-distiller`).
+  - `ask --question Y` — multi-round QA loop (replaces v0.5 `paper-distiller-qa`).
+  - `resume --session-id <sid>` — continue a paused/errored QA session.
+  - No subcommand → opens interactive REPL with welcome banner, 10 slash commands, and natural-language input routed via an LLM intent-router.
+- **`paper_distiller.agents/` package** — new async DAG framework. `Agent` protocol, `Context` dataclass, `Status` enum, `DAG` class (topology validation + topological levels), `Orchestrator` (asyncio executor with parallel-sibling scheduling), `FanoutAgent` protocol (runtime expansion into parallel sub-agents), `ConsoleRenderer` (rich live status table).
+- **11 concrete agents** — `arxiv-searcher`, `ss-searcher`, `candidate-merger`, `candidate-dedup` (in-session dedup against seen_ids), `candidate-ranker`, `paper-processor` (fanout × N), `vault-writer`, `survey-composer`, `progress-reflector`, `answer-synthesizer`, `intent-router`.
+- **REPL slash commands**: `/distill`, `/ask`, `/resume`, `/sessions`, `/vault`, `/provider`, `/agents`, `/show`, `/help`, `/quit`. All deterministic (no LLM call).
+- **Natural-language routing**: any non-slash input goes through `IntentRouter` (one LLM call with the routing prompt), produces a classified command + extracted params + missing-params list, and asks the user to confirm before executing.
+- **Live status table** (via the rich library) for all multi-step operations, showing per-agent status + elapsed time.
+
+### Changed
+- **Wire format unchanged.** Vault files, frontmatter, `[[wikilink]]` cross-references all unchanged from v0.5. Existing vaults open seamlessly with v1.0.
+- **QA-mode now writes `answer_survey_slug`** to `<vault>/surveys/qa-<slug>-<date>.md` (was already true in v0.5 but the answer-survey is now produced by an agent rather than the procedural loop).
+- **Documentation rewrite**: `README.md` and `docs/ARCHITECTURE.md` rewritten around the v1.0 chat-first interface.
+
+### Removed (BREAKING)
+- `paper-distiller` console script.
+- `paper-distiller-qa` console script.
+- `src/paper_distiller/cli.py`.
+- `src/paper_distiller/qa/cli.py`.
+- `src/paper_distiller/qa/loop.py` — its logic is preserved in `chat/qa_runner.py` + the 3 new QA agents.
+
+### Migration
+
+If you have scripts calling `paper-distiller --vault X --topic Y --n N`, replace with:
+
+```bash
+paper-distiller-chat distill --vault X --topic Y --n N
+```
+
+If you have scripts calling `paper-distiller-qa --vault X --question Y ...`, replace with:
+
+```bash
+paper-distiller-chat ask --vault X --question Y ...
+```
+
+The flag names, defaults, and behavior are otherwise preserved.
+
+### Internal
+- New runtime deps: `rich>=13` (status table), `prompt_toolkit>=3` (REPL input + tab completion).
+- New dev dep: `pytest-asyncio>=0.23` (for the async test suite).
+- 168 tests passing (was 78 at v0.5 start; +50 from Plan 1 framework + Plan 2 QA + Plan 3 REPL; -11 deleted with the removed CLIs).
+- CI matrix: Python 3.10 / 3.11 / 3.12 on Ubuntu.
+
 ## [0.5.1] — 2026-05-19
 
 First PyPI release. No code changes beyond engineering setup; the v0.5.0 feature set is unchanged.

@@ -1,14 +1,14 @@
 [project]
 name = "paper-distiller"
-version = "0.5.1"
-description = "Distill arxiv research papers into an Obsidian-compatible markdown wiki."
+version = "1.0.0"
+description = "Chat-first paper distillation: turn arXiv papers into an Obsidian-ready knowledge base."
 authors = [{name = "jesson-hh", email = "xuyi1030@proton.me"}]
 license = {text = "MIT"}
 readme = "README.md"
 requires-python = ">=3.10"
 keywords = ["obsidian", "research", "arxiv", "knowledge-base", "llm", "distillation"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3.10",
@@ -29,8 +29,6 @@ dependencies = [
 dev = ["pytest>=8.0", "pytest-mock>=3.12", "pytest-asyncio>=0.23", "ruff>=0.5"]
 
 [project.scripts]
-paper-distiller = "paper_distiller.cli:main"
-paper-distiller-qa = "paper_distiller.qa.cli:main"
 paper-distiller-chat = "paper_distiller.chat.cli:main"
 
 [project.urls]
