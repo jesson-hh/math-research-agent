@@ -51,6 +51,7 @@ __all__ = [
     "tool_show",
     "tool_ask",
     "tool_research",
+    "tool_ask_user",
 ]
 
 
@@ -252,12 +253,68 @@ _RESEARCH_SCHEMA = {
 }
 
 
+_ASK_USER_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "ask_user",
+        "description": (
+            "Pause and ask the user a multiple-choice question. Use ONLY for "
+            "genuine ambiguity that the user should decide — e.g. choosing "
+            "which papers from a search result to distill, confirming a "
+            "costly research run, picking among multiple plausible "
+            "interpretations of a vague request. Do NOT use for trivial "
+            "confirmations the agent could decide itself."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "question": {
+                    "type": "string",
+                    "description": "The complete question to ask the user.",
+                },
+                "header": {
+                    "type": "string",
+                    "description": "Short chip label (<=12 chars).",
+                    "default": "?",
+                },
+                "options": {
+                    "type": "array",
+                    "minItems": 2,
+                    "maxItems": 4,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "label": {
+                                "type": "string",
+                                "description": "Display text (1-5 words)",
+                            },
+                            "description": {
+                                "type": "string",
+                                "description": "What this option means",
+                            },
+                        },
+                        "required": ["label", "description"],
+                    },
+                },
+                "multi_select": {
+                    "type": "boolean",
+                    "description": "Allow selecting multiple options (default false).",
+                    "default": False,
+                },
+            },
+            "required": ["question", "options"],
+        },
+    },
+}
+
+
 TOOL_SCHEMAS: list = [
     _SEARCH_SCHEMA,
     _DISTILL_BY_ID_SCHEMA,
     _SHOW_SCHEMA,
     _ASK_SCHEMA,
     _RESEARCH_SCHEMA,
+    _ASK_USER_SCHEMA,
 ]
 
 
@@ -523,12 +580,77 @@ def tool_research(
 # Dispatch table + execute_tool
 # ---------------------------------------------------------------------------
 
+def tool_ask_user(
+    question: str,
+    options: list,
+    header: str = "?",
+    multi_select: bool = False,
+    *,
+    vault_path: str,
+) -> dict:
+    """Show a multi-choice question to the user; return their selection."""
+    try:
+        if not options or len(options) < 2:
+            return {"error": "options must have at least 2 entries"}
+        from rich.console import Console
+        from rich.panel import Panel
+        console = Console()
+        n = len(options)
+        lines = [f"[bold]{question}[/bold]\n"]
+        for i, opt in enumerate(options, start=1):
+            label = opt.get("label", "?")
+            desc = opt.get("description", "")
+            lines.append(f"  [bold cyan]{i}[/bold cyan]. {label}")
+            lines.append(f"      [dim]{desc}[/dim]")
+        console.print(Panel(
+            "\n".join(lines),
+            title=f"[bold]{header}[/bold]",
+            border_style="cyan",
+        ))
+        for _attempt in range(3):
+            prompt_text = (
+                "Pick (e.g. '1,3' for multi)" if multi_select else "Pick"
+            )
+            try:
+                raw = input(f"  {prompt_text} (1-{n}, q to cancel): ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                return {"cancelled": True}
+            if raw in ("q", "quit", "exit", ""):
+                return {"cancelled": True}
+            picks: list[int] = []
+            ok = True
+            for tok in raw.split(","):
+                tok = tok.strip()
+                if not tok:
+                    continue
+                try:
+                    k = int(tok)
+                except ValueError:
+                    ok = False
+                    break
+                if k < 1 or k > n:
+                    ok = False
+                    break
+                picks.append(k)
+            if not ok or not picks:
+                console.print("  [yellow]invalid input. try again.[/yellow]")
+                continue
+            if not multi_select and len(picks) > 1:
+                picks = picks[:1]
+            selected = [options[i - 1]["label"] for i in picks]
+            return {"selected": selected, "cancelled": False}
+        return {"cancelled": True}
+    except Exception as e:
+        return _error(e)
+
+
 TOOL_FUNCTIONS: dict[str, Callable] = {
     "search": tool_search,
     "distill_by_id": tool_distill_by_id,
     "show": tool_show,
     "ask": tool_ask,
     "research": tool_research,
+    "ask_user": tool_ask_user,
 }
 
 

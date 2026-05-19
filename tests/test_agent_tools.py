@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 def test_tool_schemas_valid():
     from paper_distiller.chat.agent_tools import TOOL_SCHEMAS
 
-    assert len(TOOL_SCHEMAS) == 5
+    assert len(TOOL_SCHEMAS) == 6
     for schema in TOOL_SCHEMAS:
         assert schema["type"] == "function"
         fn = schema["function"]
@@ -28,7 +28,7 @@ def test_tool_schemas_distinct_names():
     from paper_distiller.chat.agent_tools import TOOL_SCHEMAS
 
     names = [s["function"]["name"] for s in TOOL_SCHEMAS]
-    assert set(names) == {"search", "distill_by_id", "show", "ask", "research"}
+    assert set(names) == {"search", "distill_by_id", "show", "ask", "research", "ask_user"}
     assert len(names) == len(set(names))  # no duplicates
 
 
@@ -36,7 +36,9 @@ def test_tool_schemas_order_matches_spec():
     from paper_distiller.chat.agent_tools import TOOL_SCHEMAS
 
     names_in_order = [s["function"]["name"] for s in TOOL_SCHEMAS]
-    assert names_in_order == ["search", "distill_by_id", "show", "ask", "research"]
+    assert names_in_order == [
+        "search", "distill_by_id", "show", "ask", "research", "ask_user",
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -424,3 +426,99 @@ def test_paper_matches_id_case_insensitive():
     p = _FakePaper(doi="10.1234/AbC", paper_id="x")
     assert _paper_matches_id(p, "10.1234/abc")
     assert _paper_matches_id(p, "10.1234/ABC")
+
+
+# ---------------------------------------------------------------------------
+# tool_ask_user
+# ---------------------------------------------------------------------------
+
+def test_ask_user_schema_present():
+    from paper_distiller.chat.agent_tools import TOOL_SCHEMAS
+
+    names = [s["function"]["name"] for s in TOOL_SCHEMAS]
+    assert "ask_user" in names
+
+
+def test_ask_user_returns_selected_label(monkeypatch, tmp_path):
+    from paper_distiller.chat.agent_tools import tool_ask_user
+
+    inputs = iter(["1"])
+    monkeypatch.setattr("builtins.input", lambda *a, **kw: next(inputs))
+    result = tool_ask_user(
+        question="Pick one",
+        options=[
+            {"label": "Option A", "description": "a"},
+            {"label": "Option B", "description": "b"},
+        ],
+        vault_path=str(tmp_path),
+    )
+    assert result == {"selected": ["Option A"], "cancelled": False}
+
+
+def test_ask_user_multi_select(monkeypatch, tmp_path):
+    from paper_distiller.chat.agent_tools import tool_ask_user
+
+    monkeypatch.setattr("builtins.input", lambda *a, **kw: "1,3")
+    result = tool_ask_user(
+        question="Pick any",
+        options=[
+            {"label": "A", "description": "a"},
+            {"label": "B", "description": "b"},
+            {"label": "C", "description": "c"},
+        ],
+        multi_select=True,
+        vault_path=str(tmp_path),
+    )
+    assert result == {"selected": ["A", "C"], "cancelled": False}
+
+
+def test_ask_user_cancel_with_q(monkeypatch, tmp_path):
+    from paper_distiller.chat.agent_tools import tool_ask_user
+
+    monkeypatch.setattr("builtins.input", lambda *a, **kw: "q")
+    result = tool_ask_user(
+        question="?",
+        options=[
+            {"label": "A", "description": "a"},
+            {"label": "B", "description": "b"},
+        ],
+        vault_path=str(tmp_path),
+    )
+    assert result == {"cancelled": True}
+
+
+def test_ask_user_invalid_then_valid(monkeypatch, tmp_path):
+    from paper_distiller.chat.agent_tools import tool_ask_user
+
+    inputs = iter(["xxx", "1"])
+    monkeypatch.setattr("builtins.input", lambda *a, **kw: next(inputs))
+    result = tool_ask_user(
+        question="?",
+        options=[
+            {"label": "A", "description": "a"},
+            {"label": "B", "description": "b"},
+        ],
+        vault_path=str(tmp_path),
+    )
+    assert result == {"selected": ["A"], "cancelled": False}
+
+
+def test_ask_user_in_execute_tool_dispatch(mocker, tmp_path):
+    """Verify execute_tool can route ask_user too."""
+    from paper_distiller.chat.agent_tools import execute_tool
+
+    mocker.patch(
+        "builtins.input", return_value="1"
+    )
+    result = execute_tool(
+        "ask_user",
+        {
+            "question": "?",
+            "options": [
+                {"label": "A", "description": "a"},
+                {"label": "B", "description": "b"},
+            ],
+        },
+        vault_path=str(tmp_path),
+    )
+    assert result["selected"] == ["A"]
