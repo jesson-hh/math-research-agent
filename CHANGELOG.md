@@ -2,6 +2,33 @@
 
 All notable changes documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.6.0] — 2026-05-20
+
+### Added — local arxiv metadata mirror (bypass arxiv API rate limits)
+
+- **`paper_distiller.arxiv_local` package** — SQLite + FTS5 store for the full arxiv metadata catalog (~1.7M papers, ~5 GB after bootstrap). Search queries no longer hit arxiv's live API — they run against the local index at <10 ms.
+- **`paper-distiller-arxiv` CLI** with subcommands:
+  - `bootstrap` — one-time bulk ingest from Internet Archive (no auth, default) / Kaggle / OAI-PMH from scratch. Auto-fallback chain.
+  - `sync` — incremental OAI-PMH update since `last_sync` (~5 min when run daily).
+  - `search` — local FTS5 query (BM25 ranking or `--sort date`).
+  - `stats` — paper count, DB size, last sync time.
+  - `doctor` — diagnose DB integrity + OAI-PMH reachability.
+- **`LocalFirstFetcher`** — transparent local/live switch behind `ArxivSearcher`. When the local mirror is populated, the agent's `search` queries hit the local DB. Cold start (empty DB) transparently falls through to the v1.5 live-API path; existing users see no behavior change until they bootstrap.
+- **`PD_ARXIV_LOCAL_ONLY=1`** env flag — disables live-API fallback for air-gapped / offline use.
+
+### Internal
+
+- New dep: `sickle>=0.7` (OAI-PMH client library).
+- SQLite schema versioned via `meta.schema_version` for future migrations. FTS5 with `porter unicode61` tokenizer + BM25 ranking.
+- `~/.paper-distiller/arxiv/arxiv.db` shared across all vaults / sessions (override via `PD_ARXIV_LOCAL_DIR`).
+- Bootstrap source chain (Internet Archive → Kaggle → OAI-PMH) handles partial failures gracefully.
+- **+45 new tests** across 6 modules (`store`, `bootstrap`, `incremental`, `search`, `fetcher`, `cli`). Total: **362** (was 317).
+
+### Backward compatibility
+
+- If user hasn't run `paper-distiller-arxiv bootstrap`, search behavior is identical to v1.5 (live arxiv API with throttle + cooldown).
+- All existing CLI commands and tools unchanged.
+
 ## [1.5.0] — 2026-05-19
 
 ### Added — Claude Code-style UX + agent control
