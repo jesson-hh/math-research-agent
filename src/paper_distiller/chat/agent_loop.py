@@ -60,11 +60,13 @@ DEFAULT_SYSTEM_PROMPT = """\
 3. **show(slug, category="articles")** — 读取 vault 中已保存的条目，返回 markdown body。
 
 4. **ask(question, max_rounds=3, per_round=2, max_cost_cny=5.0, max_articles=10)** \
-— 多轮 QA 循环：搜索 → 蒸馏 → 反思，直到回答了问题或耗尽预算。返回会话摘要。
+— 多轮 QA 循环：搜索 → 蒸馏 → 反思，直到回答了问题或耗尽预算。返回会话摘要。\
+**搜索限定 arxiv 本地镜像**（不调外部 API）。
 
 5. **research(question, duration="2h", max_papers=20, max_cost_cny=15.0)** — \
 长时自主深度研究模式（5 阶段循环），产出 ~20 篇蒸馏文章 + 主题综述 + 最终报告。\
-默认 2 小时；用户明确说"深度研究"或"长时跑"时再用，普通问题用 ask。
+默认 2 小时；用户明确说"深度研究"或"长时跑"时再用，普通问题用 ask。\
+**所有搜索均限定 arxiv 本地镜像**（无外部 API 调用，零限速风险）。
 
 6. **ask_user(question, options=[{label, description}, ...], multi_select=False)** — \
 **关键判断模糊时**调用：让用户从 2-4 个选项中挑。比如 search 返回 10 篇候选你不知该蒸馏哪几篇、\

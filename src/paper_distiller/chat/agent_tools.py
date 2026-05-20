@@ -193,7 +193,8 @@ _ASK_SCHEMA = {
         "description": (
             "Ask a research question; runs a multi-round QA loop that "
             "alternates search + distill until the question is answered or a "
-            "budget is exhausted."
+            "budget is exhausted. All searches use the LOCAL arxiv mirror "
+            "(no external API calls, no rate-limit risk)."
         ),
         "parameters": {
             "type": "object",
@@ -237,7 +238,9 @@ _RESEARCH_SCHEMA = {
             "Long-running autonomous deep-research mode: 5-phase loop "
             "(seed → expand → structure → synthesize → gap-check) that "
             "produces ~30 distilled articles plus theme syntheses and a "
-            "final report. Budgeted by time + cost + paper count."
+            "final report. Budgeted by time + cost + paper count. "
+            "All searches use the LOCAL arxiv mirror — no external API "
+            "calls, no rate-limit risk."
         ),
         "parameters": {
             "type": "object",
@@ -567,7 +570,8 @@ def tool_distill_by_id(
             topic=search_topic,
             n=len(ids),
             pool=max(len(ids) * 5, 30),
-            source="all",
+            source="arxiv",  # arxiv-only: local mirror has full coverage,
+                              # SS/OpenAlex would only add rate-limit risk
         )
         vault = VaultStore(cfg.vault_path)
         llm = LLMClient(cfg.api_key, cfg.base_url, cfg.model)
@@ -683,7 +687,7 @@ def tool_ask(
             max_cost_cny=max_cost_cny,
             confidence_threshold=8,
             per_round=per_round,
-            source="all",
+            source="arxiv",
             interactive=False,
             resume_session_id=None,
             dry_run=False,
@@ -710,7 +714,7 @@ def tool_research(
             max_papers=max_papers,
             max_cost_cny=max_cost_cny,
             max_duration_sec=duration_sec,
-            source="all",
+            source="arxiv",
             resume_session_id=None,
             dry_run=False,
         )
