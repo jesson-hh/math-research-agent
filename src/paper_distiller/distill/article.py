@@ -65,6 +65,10 @@ def distill(
     index_lines = wiki_index.to_prompt_lines() or ["(vault is empty — no crosslinks yet)"]
     wiki_index_block = "\n".join(index_lines[:200])  # cap at 200 lines (~10K tokens)
 
+    # qwen3.5-plus / qwen-plus support 128K tokens ≈ 400K chars input.
+    # Reserve ~30K chars for prompt header + wiki index + JSON template,
+    # leaving ~350K chars for the paper text. Use 250K as a safe ceiling.
+    _MAX_TEXT_CHARS = 250_000
     prompt = _PROMPT_FILE.read_text(encoding="utf-8").format(
         paper_title=paper.title,
         paper_authors=", ".join(paper.authors),
@@ -72,7 +76,7 @@ def distill(
         paper_published=paper.published,
         paper_abstract=paper.abstract,
         depth_mode=depth_mode,
-        full_text=body_input[:120_000],  # cap to ~30K tokens worth
+        full_text=body_input[:_MAX_TEXT_CHARS],
         wiki_index_block=wiki_index_block,
     )
     raw = llm.complete(

@@ -194,7 +194,8 @@ _ASK_SCHEMA = {
             "Ask a research question; runs a multi-round QA loop that "
             "alternates search + distill until the question is answered or a "
             "budget is exhausted. All searches use the LOCAL arxiv mirror "
-            "(no external API calls, no rate-limit risk)."
+            "(no external API calls, no rate-limit risk). v1.7: deeper "
+            "per-paper distillation (3-6k chars each), bigger defaults."
         ),
         "parameters": {
             "type": "object",
@@ -205,23 +206,23 @@ _ASK_SCHEMA = {
                 },
                 "max_rounds": {
                     "type": "integer",
-                    "description": "Cap on QA rounds (default 3).",
-                    "default": 3,
+                    "description": "Cap on QA rounds (default 5).",
+                    "default": 5,
                 },
                 "per_round": {
                     "type": "integer",
-                    "description": "How many papers to distill per round (default 2).",
-                    "default": 2,
+                    "description": "How many papers to distill per round (default 3).",
+                    "default": 3,
                 },
                 "max_cost_cny": {
                     "type": "number",
-                    "description": "Cost ceiling in CNY (default 5.0).",
-                    "default": 5.0,
+                    "description": "Cost ceiling in CNY (default 10.0).",
+                    "default": 10.0,
                 },
                 "max_articles": {
                     "type": "integer",
-                    "description": "Cap on total articles distilled (default 10).",
-                    "default": 10,
+                    "description": "Cap on total articles distilled (default 15).",
+                    "default": 15,
                 },
             },
             "required": ["question"],
@@ -237,10 +238,12 @@ _RESEARCH_SCHEMA = {
         "description": (
             "Long-running autonomous deep-research mode: 5-phase loop "
             "(seed → expand → structure → synthesize → gap-check) that "
-            "produces ~30 distilled articles plus theme syntheses and a "
-            "final report. Budgeted by time + cost + paper count. "
+            "produces ~40 deeply distilled articles plus theme syntheses "
+            "and a final report. Budgeted by time + cost + paper count. "
             "All searches use the LOCAL arxiv mirror — no external API "
-            "calls, no rate-limit risk."
+            "calls, no rate-limit risk. v1.7: per-paper distillation is "
+            "3-6k Chinese chars with 12-section template; multiple papers "
+            "distilled in parallel (5-way concurrent LLM)."
         ),
         "parameters": {
             "type": "object",
@@ -252,19 +255,27 @@ _RESEARCH_SCHEMA = {
                 "duration": {
                     "type": "string",
                     "description": (
-                        "Time budget like '30m', '2h', '1h30m' (default '2h')."
+                        "Time budget like '30m', '2h', '1h30m', '6h' "
+                        "(default '6h' for deep research; raise if user "
+                        "explicitly asks for shallower / faster)."
                     ),
-                    "default": "2h",
+                    "default": "6h",
                 },
                 "max_papers": {
                     "type": "integer",
-                    "description": "Cap on papers to distill (default 20).",
-                    "default": 20,
+                    "description": (
+                        "Cap on papers to distill (default 40). "
+                        "Each paper now produces 3-6k Chinese chars."
+                    ),
+                    "default": 40,
                 },
                 "max_cost_cny": {
                     "type": "number",
-                    "description": "Cost ceiling in CNY (default 15.0).",
-                    "default": 15.0,
+                    "description": (
+                        "Cost ceiling in CNY (default 30.0; deeper "
+                        "distillation costs more per paper)."
+                    ),
+                    "default": 30.0,
                 },
             },
             "required": ["question"],
@@ -670,10 +681,10 @@ def tool_show(
 
 def tool_ask(
     question: str,
-    max_rounds: int = 3,
-    per_round: int = 2,
-    max_cost_cny: float = 5.0,
-    max_articles: int = 10,
+    max_rounds: int = 5,
+    per_round: int = 3,
+    max_cost_cny: float = 10.0,
+    max_articles: int = 15,
     *,
     vault_path: str,
 ) -> dict:
@@ -699,9 +710,9 @@ def tool_ask(
 
 def tool_research(
     question: str,
-    duration: str = "2h",
-    max_papers: int = 20,
-    max_cost_cny: float = 15.0,
+    duration: str = "6h",
+    max_papers: int = 40,
+    max_cost_cny: float = 30.0,
     *,
     vault_path: str,
 ) -> dict:

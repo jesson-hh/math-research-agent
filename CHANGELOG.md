@@ -2,6 +2,27 @@
 
 All notable changes documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.7.0] — 2026-05-21
+
+### Added — deep distillation + bigger research defaults
+
+- **12-section article template** (was 6) — every paper distillation now includes: TL;DR, motivation, setup/notation, core method (with sub-sections for ideas/algorithm/theory), key theorems, experimental setup (datasets/baselines/metrics/hardware), top results with concrete numbers, ablations, limitations/failure modes, wiki crosslinks, reproduction notes, my take, citation network. Length target raised from **600-1500 chars to 3000-6000 Chinese chars** per article — researcher-grade lab-notebook depth.
+- **Paper text window: 120K → 250K chars** sent to LLM. qwen3.5-plus / qwen-plus support 128K tokens (~400K chars) of context; we now use most of it instead of aggressively truncating.
+- **Fanout concurrency cap** via `asyncio.Semaphore` (default 5 concurrent LLM calls per fanout). Override with `PD_FANOUT_CONCURRENCY` env. Prevents Aliyun rate-limit cascades when distilling many papers in parallel during `research` mode.
+- **`ask` defaults bumped**: max_rounds 3→5, per_round 2→3, max_articles 10→15, max_cost_cny ¥5→¥10.
+- **`research` defaults bumped**: duration 2h→6h, max_papers 20→40, max_cost_cny ¥15→¥30. Reflects that each paper now costs ~2-3× more to distill at the new depth target.
+
+### Internal
+
+- 3 new fanout-concurrency tests (`test_fanout_respects_concurrency_cap`, etc). Total: **376** (was 373).
+- Schema descriptions for `ask` and `research` mention the new depth + fanout concurrency so the LLM agent knows what behavior to expect.
+
+### Backward compatibility
+
+- Existing single-shot subcommands (`distill / browse / ask / research`) keep working.
+- Schema parameter names + types unchanged; only defaults shifted.
+- If a user explicitly passes `max_papers=20` or `duration="2h"`, old behavior is preserved.
+
 ## [1.6.1] — 2026-05-20
 
 ### Fixed
