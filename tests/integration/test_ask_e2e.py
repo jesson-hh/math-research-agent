@@ -55,7 +55,7 @@ def test_ask_e2e_writes_qa_survey(mocker, tmp_path, monkeypatch):
         return_value="x" * 600,
     )
 
-    def _make_article(paper, full_text, wiki_index, llm):
+    def _make_article(paper, full_text, wiki_index, llm, prior_theorems=None):
         return ArticleResult(
             slug=f"a-{paper.arxiv_id}", title=f"T-{paper.arxiv_id}",
             body=f"body {paper.arxiv_id}", tags=["t"],

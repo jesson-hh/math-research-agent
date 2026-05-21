@@ -1,0 +1,185 @@
+"""Tests for proofs.store — SQLite + FTS5 of theorems / techniques."""
+
+from __future__ import annotations
+
+
+def _sample_sidecar():
+    from paper_distiller.proofs.store import ProofSidecar
+    return ProofSidecar(
+        theorems=[
+            {
+                "name": "Theorem 4.3",
+                "statement": "For all $f \\in \\mathcal{F}$, "
+                             "$\\|f\\|_\\infty \\leq C n^{-1/2}$",
+                "proof_sketch": "Apply Bernstein's concentration + chaining.",
+                "techniques_used": ["Bernstein concentration", "Dudley chaining"],
+            },
+            {
+                "name": "Lemma 5.1",
+                "statement": "If $X, Y$ are sub-Gaussian, then "
+                             "$\\mathbb{E}[XY] \\leq \\|X\\|_{\\psi_2}\\|Y\\|_{\\psi_2}$.",
+                "proof_sketch": "Apply Hölder for Orlicz spaces.",
+                "techniques_used": ["Hölder", "Orlicz norm"],
+            },
+        ],
+        key_definitions=[
+            {"name": "IPM", "statement": "$d_\\mathcal{F}(\\mu,\\nu) = \\sup_{f \\in \\mathcal{F}}|\\mathbb{E}_\\mu f - \\mathbb{E}_\\nu f|$"}
+        ],
+        key_techniques=["Bernstein concentration", "Dudley chaining", "Hölder", "Orlicz norm", "ReLU approximation"],
+    )
+
+
+def test_store_creates_schema(tmp_path):
+    from paper_distiller.proofs.store import ProofStore
+
+    store = ProofStore(tmp_path / "proofs.db")
+    tables = {row[0] for row in store._conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    )}
+    assert "theorems" in tables
+    assert "techniques" in tables
+    assert "theorems_fts" in tables
+    assert store.theorem_count() == 0
+    assert store.technique_count() == 0
+    store.close()
+
+
+def test_ingest_sidecar(tmp_path):
+    from paper_distiller.proofs.store import ProofStore
+
+    store = ProofStore(tmp_path / "proofs.db")
+    result = store.ingest_sidecar(_sample_sidecar(), "2110.12319", paper_slug="bigan-bounds")
+
+    assert result["theorems_inserted"] == 2
+    assert result["techniques_new"] == 5  # 5 distinct techniques
+    assert store.theorem_count() == 2
+    assert store.technique_count() == 5
+    assert store.paper_count() == 1
+    store.close()
+
+
+def test_ingest_is_idempotent_per_paper(tmp_path):
+    from paper_distiller.proofs.store import ProofStore
+
+    store = ProofStore(tmp_path / "proofs.db")
+    store.ingest_sidecar(_sample_sidecar(), "2110.12319")
+    store.ingest_sidecar(_sample_sidecar(), "2110.12319")
+    # Re-ingest of same paper → 2 theorems (no doubling)
+    assert store.theorem_count() == 2
+    store.close()
+
+
+def test_theorems_using_technique(tmp_path):
+    from paper_distiller.proofs.store import ProofStore
+
+    store = ProofStore(tmp_path / "proofs.db")
+    store.ingest_sidecar(_sample_sidecar(), "2110.12319")
+
+    results = store.theorems_using_technique("Hölder")
+    assert len(results) == 1
+    assert results[0].name == "Lemma 5.1"
+
+    results2 = store.theorems_using_technique("Bernstein concentration")
+    assert len(results2) == 1
+    assert results2[0].name == "Theorem 4.3"
+
+    # Nonexistent technique → empty
+    assert store.theorems_using_technique("Quantum Tunneling") == []
+    store.close()
+
+
+def test_search_theorems_fts(tmp_path):
+    from paper_distiller.proofs.store import ProofStore
+
+    store = ProofStore(tmp_path / "proofs.db")
+    store.ingest_sidecar(_sample_sidecar(), "2110.12319")
+
+    # Statement matches
+    rs = store.search_theorems("sub-Gaussian")
+    assert len(rs) == 1
+    assert rs[0].name == "Lemma 5.1"
+
+    # Proof sketch matches
+    rs = store.search_theorems("chaining")
+    assert len(rs) == 1
+    assert rs[0].name == "Theorem 4.3"
+
+    # No match → empty
+    assert store.search_theorems("nonsense") == []
+    store.close()
+
+
+def test_retrieve_relevant_dedups(tmp_path):
+    from paper_distiller.proofs.store import ProofStore
+
+    store = ProofStore(tmp_path / "proofs.db")
+    store.ingest_sidecar(_sample_sidecar(), "2110.12319")
+
+    # Both technique names point to the SAME theorem (Lemma 5.1)
+    out = store.retrieve_relevant(["Hölder", "Orlicz norm"], limit_per_technique=5)
+    # Should dedupe — Lemma 5.1 appears once
+    assert len(out) == 1
+    assert out[0].name == "Lemma 5.1"
+    store.close()
+
+
+def test_retrieve_relevant_caps_total(tmp_path):
+    from paper_distiller.proofs.store import ProofStore, ProofSidecar
+
+    store = ProofStore(tmp_path / "proofs.db")
+    # Ingest 5 distinct papers, each with 1 theorem using "Hölder"
+    for i in range(5):
+        sidecar = ProofSidecar(
+            theorems=[{
+                "name": f"Theorem {i}",
+                "statement": "$x \\leq y$",
+                "proof_sketch": "trivial",
+                "techniques_used": ["Hölder"],
+            }],
+            key_techniques=["Hölder"],
+        )
+        store.ingest_sidecar(sidecar, f"2110.000{i}")
+
+    out = store.retrieve_relevant(["Hölder"], limit_per_technique=10, max_total=3)
+    assert len(out) == 3
+    store.close()
+
+
+def test_open_for_vault_creates_subdir(tmp_path):
+    from paper_distiller.proofs.store import open_for_vault
+
+    vault = tmp_path / "myvault"
+    vault.mkdir()
+    store = open_for_vault(vault)
+    assert (vault / ".proof_store" / "proofs.db").exists()
+    store.close()
+
+
+def test_proof_sidecar_from_json_robust():
+    from paper_distiller.proofs.store import ProofSidecar
+
+    # Empty / missing fields
+    assert ProofSidecar.from_json({}).theorems == []
+    assert ProofSidecar.from_json({}).key_techniques == []
+    # Wrong type
+    assert ProofSidecar.from_json("not a dict").theorems == []
+    assert ProofSidecar.from_json(None).theorems == []
+    # Partial
+    s = ProofSidecar.from_json({"theorems": [{"name": "x"}]})
+    assert len(s.theorems) == 1
+
+
+def test_techniques_first_seen_arxiv_id(tmp_path):
+    from paper_distiller.proofs.store import ProofStore, ProofSidecar
+
+    store = ProofStore(tmp_path / "proofs.db")
+    s1 = ProofSidecar(theorems=[], key_techniques=["Hölder"])
+    store.ingest_sidecar(s1, "2020.001")
+    # Second paper uses same technique — first_seen stays as 2020.001
+    s2 = ProofSidecar(theorems=[], key_techniques=["Hölder"])
+    store.ingest_sidecar(s2, "2026.002")
+
+    techs = store.list_techniques()
+    holder = [t for t in techs if t.name == "Hölder"][0]
+    assert holder.first_seen_arxiv_id == "2020.001"
+    store.close()

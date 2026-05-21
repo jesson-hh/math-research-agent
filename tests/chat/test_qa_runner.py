@@ -72,7 +72,7 @@ def _common_mocks(mocker, reflection_responses):
         "paper_distiller.agents.processor.fetch_with_fallback",
         return_value="x" * 600,
     )
-    def _make_article(paper, full_text, wiki_index, llm):
+    def _make_article(paper, full_text, wiki_index, llm, prior_theorems=None):
         from paper_distiller.distill.article import ArticleResult
         return ArticleResult(
             slug=f"a-{paper.arxiv_id}", title=f"T-{paper.arxiv_id}",

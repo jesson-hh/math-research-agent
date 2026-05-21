@@ -45,7 +45,7 @@ def test_distill_e2e_writes_articles_to_vault(mocker, tmp_path, monkeypatch):
     )
     mocker.patch(
         "paper_distiller.agents.processor.distill_article",
-        side_effect=lambda paper, full_text, wiki_index, llm: ArticleResult(
+        side_effect=lambda paper, full_text, wiki_index, llm, prior_theorems=None: ArticleResult(
             slug=f"a-{paper.arxiv_id}", title=f"T-{paper.arxiv_id}",
             body=f"body {paper.arxiv_id}", tags=["t"], refs=[f"arxiv:{paper.arxiv_id}"],
             depth="full-pdf",

@@ -48,7 +48,7 @@ async def test_processor_fans_out_one_subagent_per_paper(mocker):
     mocker.patch("paper_distiller.agents.processor.fetch_with_fallback", return_value="x" * 600)
     mocker.patch(
         "paper_distiller.agents.processor.distill_article",
-        side_effect=lambda paper, full_text, wiki_index, llm: ArticleResult(
+        side_effect=lambda paper, full_text, wiki_index, llm, prior_theorems=None: ArticleResult(
             slug=f"a-{paper.arxiv_id}", title=f"T-{paper.arxiv_id}",
             body="b", tags=[], refs=[f"arxiv:{paper.arxiv_id}"],
             depth="full-pdf",

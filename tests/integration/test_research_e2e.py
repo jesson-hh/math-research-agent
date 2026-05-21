@@ -51,7 +51,7 @@ def test_research_e2e(mocker, tmp_path, monkeypatch):
     )
     mocker.patch(
         "paper_distiller.agents.processor.distill_article",
-        side_effect=lambda p, ft, wi, llm: ArticleResult(
+        side_effect=lambda p, ft, wi, llm, prior_theorems=None: ArticleResult(
             slug=f"a-{p.arxiv_id}", title=f"T-{p.arxiv_id}",
             body=f"# T-{p.arxiv_id}\n\nBody.", tags=["t"],
             refs=[f"arxiv:{p.arxiv_id}"], depth="full-pdf",

@@ -49,9 +49,32 @@ Return strictly one JSON object, no commentary, no markdown fence:
   "title": "中文优先的条目标题",
   "body": "完整 markdown 内容，按下面结构组织。不要写 YAML frontmatter。",
   "tags": ["标签1", "标签2", "...", "5-10 个"],
-  "refs": ["arxiv:{paper_arxiv_id}"]
+  "refs": ["arxiv:{paper_arxiv_id}"],
+  "proof_sidecar": {{
+    "theorems": [
+      {{
+        "name": "定理编号或简称，例如 'Theorem 4.3' 或 'Main Theorem'",
+        "statement": "完整数学陈述，保留 LaTeX 公式，简明 1-3 句",
+        "proof_sketch": "证明 sketch 或核心思路，2-5 句。如无 proof 详情则写 'abstract-only'",
+        "techniques_used": ["定理 / 不等式 / 技术名称，如 'Hölder', 'Bernstein concentration', 'Lipschitz extension'"]
+      }}
+    ],
+    "key_definitions": [
+      {{"name": "概念名称", "statement": "形式定义，保留 LaTeX"}}
+    ],
+    "key_techniques": [
+      "本文主要使用的数学技术 / 不等式 / 框架（去重 + 规范化命名，如 'Hölder inequality', 'Empirical process bound', 'Wasserstein duality', 'ReLU network approximation'）"
+    ]
+  }}
 }}
 ```
+
+**关于 `proof_sidecar`**：这是结构化数据，给后续论文蒸馏时做 cross-reference 用。
+- `theorems`: paper 中**编号过的或重要命题**（不必每个引理都列，挑核心 3-8 个）
+- `key_definitions`: 引入了新概念 / 新算子 / 新分布定义（2-5 个）
+- `key_techniques`: 用到的数学工具规范名称（5-15 个）。**规范化**: "Hölder" 不是 "Holder's inequality" 不是 "霍尔德"。统一英文短名。
+
+如果是 abstract-only mode，`proof_sidecar` 各 list 可以是空 list。**不要**强行编造没在 paper 里出现的定理。
 
 The `body` field follows this **exact** 12-section structure. Each section
 must have substantive content, not "见原文 / TBD" placeholders.

@@ -2,6 +2,28 @@
 
 All notable changes documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.8.0] — 2026-05-21
+
+### Added — proof / technique knowledge base + cross-paper RAG
+
+- **`paper_distiller.proofs` module**: SQLite + FTS5 store of theorems / techniques extracted during each paper's distillation. Stored per-vault at `<vault>/.proof_store/proofs.db`. Supports retrieval by technique name (LIKE on JSON), FTS5 full-text search over theorem statements + proof sketches, and dedup-aware multi-technique retrieval (`retrieve_relevant`).
+- **`proof_sidecar` extraction**: the article distillation prompt now also produces a structured JSON sidecar alongside the markdown body, with three lists: `theorems` (name, statement, proof_sketch, techniques_used), `key_definitions` (name, statement), `key_techniques` (canonical short names like "Hölder", "Bernstein concentration"). LLMs are instructed to capture 3-8 numbered theorems per paper and 5-15 normalized technique names.
+- **Cross-paper RAG during distillation**: before LLM distillation, `PaperProcessor` keyword-scans the paper's abstract + title for ~50 known technique names, queries the ProofStore for prior theorems using those techniques, and injects them as a "已知相关定理" markdown block at the top of the LLM prompt. The LLM can now reuse notation, cite prior work as "[[paper X]]'s Theorem 4.3", and flag duplicates / contradictions.
+- **Idempotent per-paper ingest**: re-distilling a paper deletes its prior theorems and re-inserts cleanly — no duplicates.
+
+### Internal
+
+- `_extract_candidate_techniques(paper)` — cheap keyword scanner with ~50 hand-curated technique names (Hölder, Bernstein, Dudley chaining, Wasserstein, PAC-Bayes, sub-Gaussian, ReLU approximation, RKHS, etc.)
+- `_proof_store_lock` (module-level asyncio.Lock) serializes ProofStore writes across the fanout sub-agents
+- ProofStore.open_for_vault() — per-vault factory, isolates research projects from each other
+- **+16 new tests** for proofs module (10 store tests + 6 distill-integration tests). Total: **392** (was 376).
+
+### Backward compatibility
+
+- Distillation works without a ProofStore — `proof_store=None` path returns sensible defaults and skips RAG injection.
+- LLMs that don't produce `proof_sidecar` in their response → `ProofSidecar.from_json` returns empty defaults instead of crashing.
+- Tests updated to handle the new `prior_theorems=None` parameter on `distill_article()`.
+
 ## [1.7.0] — 2026-05-21
 
 ### Added — deep distillation + bigger research defaults
