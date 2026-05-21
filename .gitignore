@@ -24,3 +24,9 @@ Thumbs.db
 .pytest_cache/
 .coverage
 htmlcov/
+# MagicMock attribute coercion sometimes creates these stray dirs when
+# tests mock objects whose attributes get used as filesystem paths.
+MagicMock/
+
+# v1.8 — per-vault proof store (inside vault, shouldn't be committed)
+.proof_store/

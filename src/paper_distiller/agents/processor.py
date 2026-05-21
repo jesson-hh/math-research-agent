@@ -174,8 +174,16 @@ class PaperProcessor:
         wiki_index = load_index(ctx.vault)
         # Open the per-vault ProofStore once and share it across sub-agents.
         # _proof_store_lock serializes writes; concurrent reads are safe.
+        # Guard against MagicMock'd vaults in tests where ctx.vault.root
+        # would coerce to a string path under MagicMock/ rather than a real
+        # directory — leaking artifacts into the repo.
         try:
-            proof_store = open_for_vault(ctx.vault.root)
+            from pathlib import Path as _Path
+            root = ctx.vault.root
+            if not isinstance(root, (str, _Path)):
+                proof_store = None
+            else:
+                proof_store = open_for_vault(root)
         except Exception:
             proof_store = None
         return [
