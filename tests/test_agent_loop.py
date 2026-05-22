@@ -416,7 +416,7 @@ def test_send_passes_tool_schemas_to_llm(tmp_path):
 
     # The stub captured the tools= argument.
     assert llm.last_tools is not None
-    assert len(llm.last_tools) == 7
+    assert len(llm.last_tools) == 8
     names = [t["function"]["name"] for t in llm.last_tools]
     assert set(names) == {s["function"]["name"] for s in TOOL_SCHEMAS}
 

@@ -6,9 +6,9 @@
 [![PyPI version](https://img.shields.io/pypi/v/paper-distiller.svg)](https://pypi.org/project/paper-distiller/)
 [![Python versions](https://img.shields.io/pypi/pyversions/paper-distiller.svg)](https://pypi.org/project/paper-distiller/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-436_passing-brightgreen.svg)](#)
+[![Tests](https://img.shields.io/badge/tests-568_passing-brightgreen.svg)](#)
 
-paper-distiller is a **conversational research agent** that talks to you in natural language, decides which of 7 LLM-callable tools to use, and turns arXiv papers into a deeply-distilled, cross-referenced markdown knowledge base.
+paper-distiller is a **conversational research agent** that talks to you in natural language, decides which of 8 LLM-callable tools to use, and turns arXiv papers into a deeply-distilled, cross-referenced markdown knowledge base.
 
 ```
 ❯ 帮我搜索最近三年关于扩散模型理论的论文，挑 5 篇蒸馏
@@ -36,7 +36,8 @@ Output is plain markdown + YAML frontmatter + `[[wikilinks]]` — opens directly
 ## Features
 
 - **Conversational REPL** — natural language in, LLM decides tool calls, no flag-juggling
-- **7 LLM-callable tools** — `search` · `distill_by_id` · `show` · `ask` · `research` · `ask_user` · `find_proof`
+- **8 LLM-callable tools** — `search` · `distill_by_id` · `show` · `ask` · `research` · `ask_user` · `find_proof` · `review_proof`
+- **Proof graph & review** — distillation optionally builds a step-level dependency DAG (`PD_GRAPH_DEPTH=step`); the `review_proof` tool walks the graph and flags suspicious steps / logic gaps with grounded reasons
 - **Local arXiv mirror** (~1.7M papers, ~5 GB) — bootstrap once via OAI-PMH, search forever zero-latency
 - **Deep 12-section distillation** — 3-6k Chinese chars per paper, capturing theorems / proofs / experiments / techniques in a researcher-grade lab-notebook format
 - **Cross-paper proof retrieval (RAG)** — every paper's proof sidecar (theorems + techniques) goes into a vault-local SQLite + FTS5 store; future distillations retrieve relevant prior theorems and feed them to the LLM as context, so notation + technique naming converges across the vault
@@ -61,7 +62,13 @@ Requires Python **3.10+**. From source:
 git clone https://github.com/jesson-hh/paper-distiller
 cd paper-distiller
 pip install -e ".[dev]"
-pytest -v       # 436 tests should pass
+pytest -v       # 568 tests should pass
+```
+
+Optional: install [LLMLingua](https://github.com/microsoft/LLMLingua) for prompt compression during proof extraction:
+
+```bash
+pip install "paper-distiller[compress]"
 ```
 
 ---
@@ -100,8 +107,9 @@ cp examples/example.env .env
 | `PD_ARXIV_LOCAL_DIR` | `~/.paper-distiller/arxiv` | Local mirror DB location |
 | `PD_HISTORY_FILE` | `~/.paper-distiller/history.jsonl` | Input history file |
 | `PD_SS_API_KEY` | (none) | Semantic Scholar API key (raises rate limit ~100×) |
+| `PD_GRAPH_DEPTH` | (off) | Proof graph extraction depth: `off` (default) · `theorem` · `step` |
 
-✱ required. Full list in [docs/configuration.md](docs/configuration.md).
+✱ required.
 
 ---
 
@@ -153,7 +161,7 @@ paper-distiller-chat research --vault X --question "..." --duration 6h --max-pap
 
 ---
 
-## The 7 LLM-callable tools
+## The 8 LLM-callable tools
 
 | Tool | Purpose |
 |---|---|
@@ -163,9 +171,10 @@ paper-distiller-chat research --vault X --question "..." --duration 6h --max-pap
 | `ask(question, ...)` | Multi-round QA loop: search → distill → reflect |
 | `research(question, ...)` | Long-running 5-phase deep research (default 6h, 40 papers) |
 | `ask_user(question, options)` | Pause and let the user pick between 2-4 options |
-| `find_proof(query_type, query)` | Query the vault's accumulated theorem / technique knowledge base |
+| `find_proof(query_type, query)` | Query theorem / proof-graph knowledge base (stats, by_technique, by_step, dependency_walk, node, …) |
+| `review_proof(target_type, target)` | Walk the proof DAG for a paper or node; flag suspicious steps / gaps |
 
-System prompt steers the LLM to use these autonomously. See [docs/tools.md](docs/tools.md) for full schemas.
+System prompt steers the LLM to use these autonomously. Full schemas are in `src/paper_distiller/chat/agent_tools.py`.
 
 ---
 
@@ -299,7 +308,7 @@ Configurable via `--max-cost-cny` flags + global `PD_PLAN_THRESHOLD_CNY` env. Pl
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │ AgentLoop (chat/agent_loop.py)                              │
-│   prompt_toolkit input → 7 LLM tools → streaming output     │
+│   prompt_toolkit input → 8 LLM tools → streaming output     │
 └──────────────────┬──────────────────────────────────────────┘
                    ↓ tool call
 ┌─────────────────────────────────────────────────────────────┐
@@ -340,17 +349,7 @@ Markdown is Obsidian-compatible. HTML siblings have MathJax for LaTeX.
 
 PRs welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup, test workflow, and conventions.
 
-Issues: [GitHub Issues](https://github.com/jesson-hh/paper-distiller/issues) (templates for bug / feature / question).
-
-Security disclosures: see [SECURITY.md](SECURITY.md).
-
-Code of conduct: [Contributor Covenant 2.1](CODE_OF_CONDUCT.md).
-
----
-
-## Citation
-
-If you use paper-distiller in academic work, please cite via [CITATION.cff](CITATION.cff).
+Issues: [GitHub Issues](https://github.com/jesson-hh/paper-distiller/issues).
 
 ---
 

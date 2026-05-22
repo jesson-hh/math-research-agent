@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Iterable
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 # Used by retrieve_by_text_match to filter noise tokens before FTS5 OR query
@@ -41,6 +41,37 @@ class Theorem:
     techniques_used: list  # canonical technique names
 
     # Filled in by the store on insert
+    id: int | None = None
+    created_at: str | None = None
+
+
+@dataclass
+class Node:
+    """One node in the proof graph (theorem/lemma/def/assumption/step/claim)."""
+    paper_arxiv_id: str
+    kind: str
+    text: str
+    paper_slug: str | None = None
+    label: str | None = None
+    source_quote: str | None = None
+    loc: str | None = None            # JSON string, e.g. '{"sec":"3.2","char":4120}'
+    status: str = "extracted"
+    confidence: float | None = None
+    parent_id: int | None = None
+    ord: int | None = None
+    techniques: list = field(default_factory=list)
+    id: int | None = None
+    created_at: str | None = None
+
+
+@dataclass
+class Edge:
+    """A typed dependency edge: src --rel--> dst means 'src depends on / uses dst'."""
+    src_id: int
+    dst_id: int
+    rel: str
+    justification: str | None = None
+    cross_paper: int = 0
     id: int | None = None
     created_at: str | None = None
 
@@ -122,6 +153,59 @@ CREATE TABLE IF NOT EXISTS meta (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS nodes (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  paper_arxiv_id  TEXT NOT NULL,
+  paper_slug      TEXT,
+  kind            TEXT NOT NULL,
+  label           TEXT,
+  text            TEXT NOT NULL,
+  source_quote    TEXT,
+  loc             TEXT,
+  status          TEXT NOT NULL DEFAULT 'extracted',
+  confidence      REAL,
+  parent_id       INTEGER,
+  ord             INTEGER,
+  created_at      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_nodes_paper  ON nodes(paper_arxiv_id);
+CREATE INDEX IF NOT EXISTS idx_nodes_kind   ON nodes(kind);
+CREATE INDEX IF NOT EXISTS idx_nodes_parent ON nodes(parent_id);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
+  label, text, source_quote,
+  content='nodes', content_rowid='id',
+  tokenize='porter unicode61 remove_diacritics 2'
+);
+CREATE TRIGGER IF NOT EXISTS nodes_ai AFTER INSERT ON nodes BEGIN
+  INSERT INTO nodes_fts(rowid, label, text, source_quote)
+  VALUES (new.id, new.label, new.text, new.source_quote);
+END;
+CREATE TRIGGER IF NOT EXISTS nodes_ad AFTER DELETE ON nodes BEGIN
+  INSERT INTO nodes_fts(nodes_fts, rowid, label, text, source_quote)
+  VALUES('delete', old.id, old.label, old.text, old.source_quote);
+END;
+
+CREATE TABLE IF NOT EXISTS edges (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  src_id        INTEGER NOT NULL,
+  dst_id        INTEGER NOT NULL,
+  rel           TEXT NOT NULL,
+  justification TEXT,
+  cross_paper   INTEGER NOT NULL DEFAULT 0,
+  created_at    TEXT NOT NULL,
+  UNIQUE(src_id, dst_id, rel)
+);
+CREATE INDEX IF NOT EXISTS idx_edges_src ON edges(src_id);
+CREATE INDEX IF NOT EXISTS idx_edges_dst ON edges(dst_id);
+CREATE INDEX IF NOT EXISTS idx_edges_rel ON edges(rel);
+
+CREATE TABLE IF NOT EXISTS node_techniques (
+  node_id   INTEGER NOT NULL,
+  technique TEXT NOT NULL,
+  PRIMARY KEY (node_id, technique)
+);
 """
 
 
@@ -139,14 +223,219 @@ class ProofStore:
         self._conn = sqlite3.connect(str(self.path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA)
+        self._migrate()
+        self._conn.commit()
+
+    def _migrate(self) -> None:
+        """Idempotent forward migration. v1 = theorems-only; v2 adds the graph
+        tables (created by _SCHEMA) and backfills theorem nodes."""
+        row = self._conn.execute(
+            "SELECT value FROM meta WHERE key='schema_version'"
+        ).fetchone()
+        current = int(row[0]) if row else 0
+        if current < 2:
+            self._backfill_theorems_to_nodes()
         self._conn.execute(
-            "INSERT OR IGNORE INTO meta(key, value) VALUES('schema_version', ?)",
+            "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)",
             (str(SCHEMA_VERSION),),
         )
-        self._conn.commit()
+
+    def _backfill_theorems_to_nodes(self) -> None:
+        """Copy existing `theorems` rows into `nodes` as kind='theorem'.
+        Guarded by (paper, label) so re-running never double-inserts."""
+        rows = self._conn.execute(
+            "SELECT paper_arxiv_id, paper_slug, name, statement, "
+            "techniques_used, created_at FROM theorems"
+        ).fetchall()
+        for r in rows:
+            exists = self._conn.execute(
+                "SELECT 1 FROM nodes WHERE paper_arxiv_id=? AND kind='theorem' "
+                "AND label IS ?",
+                (r["paper_arxiv_id"], r["name"]),
+            ).fetchone()
+            if exists:
+                continue
+            cur = self._conn.execute(
+                "INSERT INTO nodes(paper_arxiv_id, paper_slug, kind, label, text, "
+                "status, created_at) VALUES (?, ?, 'theorem', ?, ?, 'extracted', ?)",
+                (r["paper_arxiv_id"], r["paper_slug"], r["name"],
+                 r["statement"], r["created_at"]),
+            )
+            node_id = cur.lastrowid
+            try:
+                techs = json.loads(r["techniques_used"] or "[]")
+            except json.JSONDecodeError:
+                techs = []
+            for t in techs:
+                if isinstance(t, str) and t.strip():
+                    self._conn.execute(
+                        "INSERT OR IGNORE INTO node_techniques(node_id, technique) "
+                        "VALUES (?, ?)",
+                        (node_id, t.strip()),
+                    )
 
     def close(self) -> None:
         self._conn.close()
+
+    # ------------------------------------------------------------------
+    # Graph node CRUD
+    # ------------------------------------------------------------------
+
+    def add_node(self, node: Node) -> int:
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        cur = self._conn.execute(
+            "INSERT INTO nodes(paper_arxiv_id, paper_slug, kind, label, text, "
+            "source_quote, loc, status, confidence, parent_id, ord, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (node.paper_arxiv_id, node.paper_slug, node.kind, node.label, node.text,
+             node.source_quote, node.loc, node.status, node.confidence,
+             node.parent_id, node.ord, now),
+        )
+        node_id = cur.lastrowid
+        for t in node.techniques or []:
+            if isinstance(t, str) and t.strip():
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO node_techniques(node_id, technique) "
+                    "VALUES (?, ?)",
+                    (node_id, t.strip()),
+                )
+        self._conn.commit()
+        return node_id
+
+    def _row_to_node(self, row) -> Node:
+        techs = [r["technique"] for r in self._conn.execute(
+            "SELECT technique FROM node_techniques WHERE node_id=? ORDER BY technique",
+            (row["id"],),
+        )]
+        return Node(
+            id=row["id"], paper_arxiv_id=row["paper_arxiv_id"],
+            paper_slug=row["paper_slug"], kind=row["kind"], label=row["label"],
+            text=row["text"], source_quote=row["source_quote"], loc=row["loc"],
+            status=row["status"], confidence=row["confidence"],
+            parent_id=row["parent_id"], ord=row["ord"],
+            techniques=techs, created_at=row["created_at"],
+        )
+
+    def get_node(self, node_id: int) -> Node | None:
+        row = self._conn.execute(
+            "SELECT * FROM nodes WHERE id=?", (node_id,)).fetchone()
+        return self._row_to_node(row) if row else None
+
+    def nodes_by_paper(self, paper_arxiv_id: str) -> list[Node]:
+        rows = self._conn.execute(
+            "SELECT * FROM nodes WHERE paper_arxiv_id=? ORDER BY id",
+            (paper_arxiv_id,)).fetchall()
+        return [self._row_to_node(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Graph edge CRUD
+    # ------------------------------------------------------------------
+
+    def add_edge(self, edge: Edge) -> None:
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        self._conn.execute(
+            "INSERT OR IGNORE INTO edges(src_id, dst_id, rel, justification, "
+            "cross_paper, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (edge.src_id, edge.dst_id, edge.rel, edge.justification,
+             int(edge.cross_paper), now),
+        )
+        self._conn.commit()
+
+    def _row_to_edge(self, row) -> Edge:
+        return Edge(
+            id=row["id"], src_id=row["src_id"], dst_id=row["dst_id"], rel=row["rel"],
+            justification=row["justification"], cross_paper=row["cross_paper"],
+            created_at=row["created_at"],
+        )
+
+    def out_edges(self, node_id: int, rel: str | None = None) -> list[Edge]:
+        if rel is None:
+            rows = self._conn.execute(
+                "SELECT * FROM edges WHERE src_id=? ORDER BY id", (node_id,)).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM edges WHERE src_id=? AND rel=? ORDER BY id",
+                (node_id, rel)).fetchall()
+        return [self._row_to_edge(r) for r in rows]
+
+    def in_edges(self, node_id: int, rel: str | None = None) -> list[Edge]:
+        if rel is None:
+            rows = self._conn.execute(
+                "SELECT * FROM edges WHERE dst_id=? ORDER BY id", (node_id,)).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM edges WHERE dst_id=? AND rel=? ORDER BY id",
+                (node_id, rel)).fetchall()
+        return [self._row_to_edge(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Graph search / lookup
+    # ------------------------------------------------------------------
+
+    def search_nodes(self, query: str, limit: int = 10) -> list[Node]:
+        """FTS5 search over node label + text + source_quote."""
+        if not query.strip():
+            return []
+        tokens = ['"' + tok.replace('"', '') + '"' for tok in query.split() if tok]
+        if not tokens:
+            return []
+        rows = self._conn.execute(
+            "SELECT n.* FROM nodes n JOIN nodes_fts ON nodes_fts.rowid = n.id "
+            "WHERE nodes_fts MATCH ? ORDER BY bm25(nodes_fts) LIMIT ?",
+            (" ".join(tokens), limit),
+        ).fetchall()
+        return [self._row_to_node(r) for r in rows]
+
+    def nodes_using_technique(self, technique: str, limit: int = 10) -> list[Node]:
+        if not technique.strip():
+            return []
+        rows = self._conn.execute(
+            "SELECT n.* FROM nodes n JOIN node_techniques nt ON nt.node_id = n.id "
+            "WHERE nt.technique = ? COLLATE NOCASE ORDER BY n.id DESC LIMIT ?",
+            (technique.strip(), limit),
+        ).fetchall()
+        return [self._row_to_node(r) for r in rows]
+
+    def dependency_walk(
+        self, node_id: int, rel: str = "depends_on", max_nodes: int = 500,
+    ) -> list[Node]:
+        """Breadth-first transitive closure following `rel` edges out of node_id.
+        Excludes the root. Cycle-safe (visited set), capped at max_nodes."""
+        from collections import deque
+        seen: set[int] = {node_id}
+        order: list[int] = []
+        queue: deque[int] = deque([node_id])
+        while queue and len(order) < max_nodes:
+            cur = queue.popleft()
+            for e in self.out_edges(cur, rel):
+                if e.dst_id not in seen:
+                    seen.add(e.dst_id)
+                    order.append(e.dst_id)
+                    queue.append(e.dst_id)
+        return [n for n in (self.get_node(i) for i in order) if n is not None]
+
+    def set_node_status(self, node_id: int, status: str) -> None:
+        """Update the status column for a single node."""
+        self._conn.execute(
+            "UPDATE nodes SET status=? WHERE id=?", (status, node_id))
+        self._conn.commit()
+
+    def delete_paper_graph(self, paper_arxiv_id: str) -> None:
+        """Remove all graph nodes/edges/technique-links for one paper, so a
+        re-distill can cleanly rewrite them (paper-grained idempotency)."""
+        ids = [r["id"] for r in self._conn.execute(
+            "SELECT id FROM nodes WHERE paper_arxiv_id=?", (paper_arxiv_id,))]
+        if not ids:
+            return
+        placeholders = ",".join("?" * len(ids))
+        self._conn.execute(
+            f"DELETE FROM edges WHERE src_id IN ({placeholders}) "
+            f"OR dst_id IN ({placeholders})", (*ids, *ids))
+        self._conn.execute(
+            f"DELETE FROM node_techniques WHERE node_id IN ({placeholders})", ids)
+        self._conn.execute(
+            "DELETE FROM nodes WHERE paper_arxiv_id=?", (paper_arxiv_id,))
+        self._conn.commit()
 
     # ------------------------------------------------------------------
     # Ingestion

@@ -1,0 +1,233 @@
+"""Orchestration pipeline: turn a paper's full text into a proof graph.
+
+Public API:
+- ``CoverageReport`` dataclass — summary of what was processed.
+- ``build_graph_for_paper(store, paper_arxiv_id, full_text, *, paper_slug, llm,
+                          depth="step") -> CoverageReport``
+  Segments the text, runs the per-segment extraction+gate+self_check loop,
+  writes nodes to the store, resolves references into edges, marks dangling
+  refs as gaps, and returns a coverage report.
+- ``maybe_build_graph(proof_store, paper_arxiv_id, full_text, *, paper_slug=None,
+                      llm=None) -> CoverageReport | None``
+  Gated by ``PD_GRAPH_DEPTH`` env-var (default off). Returns None when gating
+  is off or ``proof_store`` is None. Never raises.
+
+Design constraints (from spec §5):
+- Idempotent: calls ``store.delete_paper_graph`` first so re-runs are clean.
+- Abstain over fabricate: the grounding gate (inside ``extract_segment``) ensures
+  fabricated nodes never enter the store.
+- Gaps are surfaced explicitly (not silently dropped).
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+from dataclasses import dataclass
+
+from ..proofs.store import Edge, Node, ProofStore
+from .extractor import extract_segment, self_check
+from .memory import RunningMemory
+from .reader import segment
+
+# ---------------------------------------------------------------------------
+# Helper: distinguish named mathematical results from informal references
+# ---------------------------------------------------------------------------
+
+_NAMED_RESULT_RE = re.compile(
+    r"^(theorem|lemma|proposition|corollary|claim|definition|def|"
+    r"assumption|axiom|eq|equation)\b",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_named_result(target: str) -> bool:
+    """Return True iff *target* looks like a named mathematical result.
+
+    A named result starts (case-insensitively) with one of the standard
+    keywords (theorem, lemma, proposition, …) optionally followed by a
+    number/letter.  Informal references such as "the previous bound" or
+    "this step" return False.
+    """
+    return bool(_NAMED_RESULT_RE.match(target.strip()))
+
+
+@dataclass
+class CoverageReport:
+    """Summary statistics from one paper's extraction run."""
+    segments_total: int
+    segments_processed: int
+    proof_blocks: int
+    nodes_by_kind: dict[str, int]
+    rejected_quotes: int
+    gaps: int
+    obligations: list[str]
+
+
+def build_graph_for_paper(
+    store: ProofStore,
+    paper_arxiv_id: str,
+    full_text: str,
+    *,
+    paper_slug: str | None = None,
+    llm,
+    depth: str = "step",
+) -> CoverageReport:
+    """Build (or rebuild) the proof graph for one paper.
+
+    Steps:
+    1. Delete any existing graph data for this paper (idempotency).
+    2. Segment the full text.
+    3. For each segment: extract nodes (with grounding gate), run self-check,
+       write accepted nodes to the store, update running memory.
+    4. Resolve references: for each pending (node_id, refs) pair, look up
+       ``label_to_id`` and create edges; unresolvable refs → ``status="gap"``.
+    5. Return a ``CoverageReport``.
+    """
+    # Step 1: idempotent delete
+    store.delete_paper_graph(paper_arxiv_id)
+
+    # Step 2: segment
+    segs = segment(full_text)
+    segments_total = len(segs)
+    proof_blocks = sum(1 for s in segs if s.is_proof_block)
+
+    # Step 3: per-segment loop
+    memory = RunningMemory()
+    label_to_id: dict[str, int] = {}
+    # pending: list of (node_id, refs_list, local_key_to_id)
+    # local_key_to_id maps the short per-segment keys emitted by the LLM (e.g.
+    # "n1", "n2") to the store node id, allowing intra-proof step refs to
+    # resolve without a formal label.
+    pending: list[tuple[int, list, dict[str, int]]] = []
+    nodes_by_kind: dict[str, int] = {}
+    rejected_quotes = 0
+    segments_processed = 0
+
+    for seg in segs:
+        # Extract nodes (grounding gate enforced inside extract_segment)
+        accepted, n_rejected = extract_segment(seg, memory, llm, depth=depth)
+        rejected_quotes += n_rejected
+        accepted = self_check(seg, accepted, llm)
+
+        # Build local-key map for THIS segment before writing to store
+        # (we need to map key → nid after add_node; collect keys first)
+        local_key_to_id: dict[str, int] = {}
+
+        # Write each accepted node to the store
+        for node in accepted:
+            loc = json.dumps({
+                "sec": seg.section,
+                "char_start": seg.char_start,
+            })
+            store_node = Node(
+                paper_arxiv_id=paper_arxiv_id,
+                paper_slug=paper_slug,
+                kind=node.kind,
+                label=node.label,
+                text=node.text,
+                source_quote=node.source_quote,
+                loc=loc,
+                status=node.status,
+                techniques=list(node.techniques or []),
+            )
+            nid = store.add_node(store_node)
+            # Track label → node id for global edge resolution
+            if node.label:
+                label_to_id[node.label] = nid
+            # Track local key → node id for intra-segment edge resolution
+            if node.key:
+                local_key_to_id[node.key] = nid
+            # Accumulate pending refs for edge resolution pass
+            pending.append((nid, list(node.refs or []), local_key_to_id))
+            # Tally by kind
+            nodes_by_kind[node.kind] = nodes_by_kind.get(node.kind, 0) + 1
+
+        # Update running memory with accepted nodes
+        resolved = set(label_to_id.keys())
+        memory.update(accepted, resolved_labels=resolved)
+        segments_processed += 1
+
+    # Step 4: resolve edges
+    gaps = 0
+    gap_node_ids: set[int] = set()
+    obligations: list[str] = []
+
+    for nid, refs, local_key_to_id in pending:
+        for ref in refs:
+            # Resolution order: local key first (intra-proof step), then global label
+            target_id = local_key_to_id.get(ref.target)
+            if target_id is None:
+                target_id = label_to_id.get(ref.target)
+
+            if target_id is not None and target_id != nid:
+                # Resolvable → create edge
+                edge = Edge(src_id=nid, dst_id=target_id, rel=ref.rel)
+                try:
+                    store.add_edge(edge)
+                except Exception:
+                    pass  # UNIQUE constraint if duplicate — safe to ignore
+            else:
+                # Unresolvable — distinguish named results from informal refs
+                if _looks_like_named_result(ref.target):
+                    # Named result (Lemma N, Theorem K, …) → real gap
+                    if nid not in gap_node_ids:
+                        store.set_node_status(nid, "gap")
+                        gap_node_ids.add(nid)
+                        gaps += 1
+                else:
+                    # Informal reference ("the previous bound", etc.) → soft dependency
+                    # Do NOT mark as gap; just surface in obligations for visibility
+                    pass
+                # Always record the unresolved target in obligations
+                if ref.target not in obligations:
+                    obligations.append(ref.target)
+
+    return CoverageReport(
+        segments_total=segments_total,
+        segments_processed=segments_processed,
+        proof_blocks=proof_blocks,
+        nodes_by_kind=nodes_by_kind,
+        rejected_quotes=rejected_quotes,
+        gaps=gaps,
+        obligations=obligations,
+    )
+
+
+_VALID_DEPTHS = {"theorem", "step"}
+
+
+def maybe_build_graph(
+    proof_store,
+    paper_arxiv_id: str,
+    full_text: str,
+    *,
+    paper_slug: str | None = None,
+    llm=None,
+) -> CoverageReport | None:
+    """Build the proof graph for a just-distilled paper IF PD_GRAPH_DEPTH is set
+    to 'theorem' or 'step' (default off). This is a SEPARATE LLM pass from the
+    article distillation (extra cost) — opt-in. Returns the CoverageReport or None.
+    Never raises: graph-build failures must not abort distillation."""
+    depth = os.getenv("PD_GRAPH_DEPTH", "off").strip().lower()
+    if proof_store is None or depth not in _VALID_DEPTHS or not (full_text or "").strip():
+        return None
+    try:
+        report = build_graph_for_paper(
+            proof_store, paper_arxiv_id, full_text,
+            paper_slug=paper_slug, llm=llm, depth=depth,
+        )
+    except Exception:
+        return None  # graph build is best-effort; never break the distill run
+
+    # Incremental cross-paper linking: plug the newly built paper into the
+    # vault graph.  Best-effort — a linker failure must never propagate.
+    try:
+        from .linker import link_paper  # lazy import avoids any potential cycle
+        link_paper(proof_store, paper_arxiv_id, llm)
+    except Exception:
+        pass  # linker failure is non-fatal
+
+    return report
+
+

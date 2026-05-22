@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 def test_tool_schemas_valid():
     from paper_distiller.chat.agent_tools import TOOL_SCHEMAS
 
-    assert len(TOOL_SCHEMAS) == 7
+    assert len(TOOL_SCHEMAS) == 8
     for schema in TOOL_SCHEMAS:
         assert schema["type"] == "function"
         fn = schema["function"]
@@ -30,7 +30,7 @@ def test_tool_schemas_distinct_names():
     names = [s["function"]["name"] for s in TOOL_SCHEMAS]
     assert set(names) == {
         "search", "distill_by_id", "show", "ask", "research",
-        "ask_user", "find_proof",
+        "ask_user", "find_proof", "review_proof",
     }
     assert len(names) == len(set(names))  # no duplicates
 
@@ -41,7 +41,7 @@ def test_tool_schemas_order_matches_spec():
     names_in_order = [s["function"]["name"] for s in TOOL_SCHEMAS]
     assert names_in_order == [
         "search", "distill_by_id", "show", "ask", "research",
-        "ask_user", "find_proof",
+        "ask_user", "find_proof", "review_proof",
     ]
 
 
@@ -656,3 +656,205 @@ def test_ask_user_in_execute_tool_dispatch(mocker, tmp_path):
         vault_path=str(tmp_path),
     )
     assert result["selected"] == ["A"]
+
+
+# ---------------------------------------------------------------------------
+# tool_review_proof (Task 6.4 — 8th tool)
+# ---------------------------------------------------------------------------
+
+def _make_stub_report():
+    """Build a minimal ReviewReport for monkeypatching."""
+    from paper_distiller.proofgraph.reviewer import ReviewReport, ReviewResult
+    return ReviewReport(
+        target="2110.1",
+        nodes_reviewed=2,
+        by_label={"ok": 1, "suspicious": 1},
+        flagged=[
+            ReviewResult(node_id=1, label="suspicious", reason="bad step", confidence=0.5),
+        ],
+        summary="1 of 2 nodes need attention",
+    )
+
+
+def test_tool_review_proof_paper_mode(monkeypatch, tmp_path):
+    """tool_review_proof monkeypatches review_target; checks returned dict shape."""
+    import paper_distiller.chat.agent_tools as at
+
+    stub_report = _make_stub_report()
+    monkeypatch.setattr(at, "review_target", lambda *a, **kw: stub_report)
+    # Also monkeypatch open_for_vault to avoid needing a real store
+    from paper_distiller.proofs.store import ProofStore
+    fake_store = ProofStore(tmp_path / "proofs.db")
+    monkeypatch.setattr(at, "open_for_vault", lambda p: fake_store)
+    # Provide env vars so LLMClient doesn't raise
+    monkeypatch.setenv("PD_API_KEY", "test-key")
+    monkeypatch.setenv("PD_BASE_URL", "http://localhost")
+    monkeypatch.setenv("PD_MODEL", "test-model")
+
+    from paper_distiller.chat.agent_tools import tool_review_proof
+    result = tool_review_proof(
+        target_type="paper", target="2110.1", vault_path=str(tmp_path)
+    )
+
+    assert "target" in result
+    assert "nodes_reviewed" in result
+    assert "by_label" in result
+    assert "flagged" in result
+    assert "summary" in result
+    # flagged must be a list of dicts (JSON-serializable), not ReviewResult objects
+    assert isinstance(result["flagged"], list)
+    if result["flagged"]:
+        assert isinstance(result["flagged"][0], dict)
+
+
+def test_tool_review_proof_bad_target_type_returns_error(monkeypatch, tmp_path):
+    """Unknown target_type must return {'error': ...}."""
+    monkeypatch.setenv("PD_API_KEY", "test-key")
+    monkeypatch.setenv("PD_BASE_URL", "http://localhost")
+    monkeypatch.setenv("PD_MODEL", "test-model")
+
+    from paper_distiller.chat.agent_tools import tool_review_proof
+    result = tool_review_proof(
+        target_type="galaxy", target="2110.1", vault_path=str(tmp_path)
+    )
+    assert "error" in result
+
+
+def test_tool_review_proof_missing_env_returns_error(monkeypatch, tmp_path):
+    """Missing PD_API_KEY returns {'error': ...} without crashing."""
+    monkeypatch.delenv("PD_API_KEY", raising=False)
+    monkeypatch.delenv("PD_BASE_URL", raising=False)
+    monkeypatch.delenv("PD_MODEL", raising=False)
+
+    from paper_distiller.chat.agent_tools import tool_review_proof
+    result = tool_review_proof(
+        target_type="paper", target="2110.1", vault_path=str(tmp_path)
+    )
+    assert "error" in result
+
+
+def test_review_proof_in_tool_schemas():
+    """review_proof must appear in TOOL_SCHEMAS."""
+    from paper_distiller.chat.agent_tools import TOOL_SCHEMAS
+    names = [s["function"]["name"] for s in TOOL_SCHEMAS]
+    assert "review_proof" in names
+
+
+def test_review_proof_in_tool_functions():
+    """review_proof must be in TOOL_FUNCTIONS."""
+    from paper_distiller.chat.agent_tools import TOOL_FUNCTIONS
+    assert "review_proof" in TOOL_FUNCTIONS
+
+
+def test_review_proof_in_all():
+    """tool_review_proof must appear in __all__."""
+    from paper_distiller.chat import agent_tools
+    assert "tool_review_proof" in agent_tools.__all__
+
+
+# ---------------------------------------------------------------------------
+# tool_find_proof — graph query types (Task 7.1)
+# ---------------------------------------------------------------------------
+
+def _seed_graph_store(vault_path):
+    """Seed a ProofStore with two nodes + a depends_on edge for graph query tests."""
+    from paper_distiller.proofs.store import open_for_vault, Node, Edge
+    store = open_for_vault(vault_path)
+    parent_id = store.add_node(Node(
+        paper_arxiv_id="2301.00001",
+        kind="theorem",
+        text="Bernstein concentration implies sub-Gaussian tails.",
+        label="Theorem 1.1",
+        source_quote="Bernstein concentration implies sub-Gaussian tails.",
+        techniques=["Bernstein"],
+    ))
+    child_id = store.add_node(Node(
+        paper_arxiv_id="2301.00001",
+        kind="proof_step",
+        text="Apply Bernstein to bound the moment generating function.",
+        label="Step (a)",
+        source_quote="Apply Bernstein to bound the MGF.",
+        techniques=["Bernstein", "MGF"],
+    ))
+    store.add_edge(Edge(src_id=child_id, dst_id=parent_id, rel="depends_on"))
+    store.close()
+    return parent_id, child_id
+
+
+def test_find_proof_by_step_returns_matching_node(tmp_path):
+    """by_step FTS over node text finds the 'Bernstein' node."""
+    from paper_distiller.chat.agent_tools import tool_find_proof
+    _seed_graph_store(tmp_path)
+    result = tool_find_proof("by_step", query="Bernstein", vault_path=str(tmp_path))
+    assert "nodes" in result, result
+    assert len(result["nodes"]) >= 1
+    texts = [n["text"] for n in result["nodes"]]
+    assert any("Bernstein" in t for t in texts)
+
+
+def test_find_proof_by_step_missing_query_returns_error(tmp_path):
+    """by_step without query must return {'error': ...}."""
+    from paper_distiller.chat.agent_tools import tool_find_proof
+    _seed_graph_store(tmp_path)
+    result = tool_find_proof("by_step", query=None, vault_path=str(tmp_path))
+    assert "error" in result
+
+
+def test_find_proof_dependency_walk_returns_parent(tmp_path):
+    """dependency_walk from child_id must return the parent node."""
+    from paper_distiller.chat.agent_tools import tool_find_proof
+    parent_id, child_id = _seed_graph_store(tmp_path)
+    result = tool_find_proof(
+        "dependency_walk", query=str(child_id), vault_path=str(tmp_path)
+    )
+    assert "nodes" in result, result
+    ids = [n["id"] for n in result["nodes"]]
+    assert parent_id in ids
+
+
+def test_find_proof_dependency_walk_missing_query_returns_error(tmp_path):
+    """dependency_walk without query must return {'error': ...}."""
+    from paper_distiller.chat.agent_tools import tool_find_proof
+    _seed_graph_store(tmp_path)
+    result = tool_find_proof("dependency_walk", query=None, vault_path=str(tmp_path))
+    assert "error" in result
+
+
+def test_find_proof_node_returns_node_and_edges(tmp_path):
+    """node query returns the node dict + its out-edges."""
+    from paper_distiller.chat.agent_tools import tool_find_proof
+    parent_id, child_id = _seed_graph_store(tmp_path)
+    result = tool_find_proof("node", query=str(child_id), vault_path=str(tmp_path))
+    assert "node" in result, result
+    assert "edges" in result, result
+    assert result["node"]["id"] == child_id
+    edge_dsts = [e["dst_id"] for e in result["edges"]]
+    assert parent_id in edge_dsts
+
+
+def test_find_proof_node_missing_query_returns_error(tmp_path):
+    """node query without query must return {'error': ...}."""
+    from paper_distiller.chat.agent_tools import tool_find_proof
+    _seed_graph_store(tmp_path)
+    result = tool_find_proof("node", query=None, vault_path=str(tmp_path))
+    assert "error" in result
+
+
+def test_find_proof_node_nonexistent_id_returns_error(tmp_path):
+    """node query with non-existent id must return {'error': ...}."""
+    from paper_distiller.chat.agent_tools import tool_find_proof
+    _seed_graph_store(tmp_path)
+    result = tool_find_proof("node", query="99999", vault_path=str(tmp_path))
+    assert "error" in result
+
+
+def test_find_proof_graph_query_types_in_schema(tmp_path):
+    """The _FIND_PROOF_SCHEMA enum must include by_step, dependency_walk, node."""
+    from paper_distiller.chat.agent_tools import _FIND_PROOF_SCHEMA
+    enum_vals = (
+        _FIND_PROOF_SCHEMA["function"]["parameters"]
+        ["properties"]["query_type"]["enum"]
+    )
+    assert "by_step" in enum_vals
+    assert "dependency_walk" in enum_vals
+    assert "node" in enum_vals

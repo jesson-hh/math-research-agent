@@ -183,3 +183,204 @@ def test_techniques_first_seen_arxiv_id(tmp_path):
     holder = [t for t in techs if t.name == "Hölder"][0]
     assert holder.first_seen_arxiv_id == "2020.001"
     store.close()
+
+
+def test_graph_tables_exist_on_new_db(tmp_path):
+    from paper_distiller.proofs.store import ProofStore
+    store = ProofStore(tmp_path / "proofs.db")
+    tables = {row[0] for row in store._conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    )}
+    assert {"nodes", "edges", "node_techniques"} <= tables
+    fts = {row[0] for row in store._conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='nodes_fts'"
+    )}
+    assert "nodes_fts" in fts
+    assert store._conn.execute(
+        "SELECT value FROM meta WHERE key='schema_version'"
+    ).fetchone()[0] == "2"
+    store.close()
+
+
+def test_migration_backfills_theorems_into_nodes(tmp_path):
+    """A v1-shaped DB (theorems but no theorem-nodes) gets theorem nodes on open."""
+    import sqlite3
+    db = tmp_path / "proofs.db"
+    conn = sqlite3.connect(str(db))
+    conn.executescript(
+        "CREATE TABLE theorems (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "paper_arxiv_id TEXT NOT NULL, paper_slug TEXT, name TEXT NOT NULL, "
+        "statement TEXT NOT NULL, proof_sketch TEXT, techniques_used TEXT NOT NULL, "
+        "created_at TEXT NOT NULL);"
+        "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);"
+    )
+    conn.execute(
+        "INSERT INTO theorems(paper_arxiv_id,paper_slug,name,statement,proof_sketch,"
+        "techniques_used,created_at) VALUES(?,?,?,?,?,?,?)",
+        ("2110.1", "slug-a", "Theorem 1", "X holds.", "sketch",
+         '["Bernstein"]', "2026-01-01T00:00:00"),
+    )
+    conn.execute("INSERT INTO meta(key,value) VALUES('schema_version','1')")
+    conn.commit()
+    conn.close()
+
+    from paper_distiller.proofs.store import ProofStore
+    store = ProofStore(db)  # opening runs the migration
+    rows = store._conn.execute(
+        "SELECT paper_arxiv_id, kind, label, text FROM nodes WHERE kind='theorem'"
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["paper_arxiv_id"] == "2110.1"
+    assert rows[0]["label"] == "Theorem 1"
+    techs = [r["technique"] for r in store._conn.execute(
+        "SELECT technique FROM node_techniques")]
+    assert techs == ["Bernstein"]
+    assert store._conn.execute(
+        "SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "2"
+    store.close()
+
+
+def test_migration_is_idempotent(tmp_path):
+    """Re-opening a migrated DB must not double-create theorem nodes."""
+    import sqlite3
+    db = tmp_path / "proofs.db"
+    conn = sqlite3.connect(str(db))
+    conn.executescript(
+        "CREATE TABLE theorems (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "paper_arxiv_id TEXT NOT NULL, paper_slug TEXT, name TEXT NOT NULL, "
+        "statement TEXT NOT NULL, proof_sketch TEXT, techniques_used TEXT NOT NULL, "
+        "created_at TEXT NOT NULL);"
+        "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);"
+    )
+    for i in (1, 2):
+        conn.execute(
+            "INSERT INTO theorems(paper_arxiv_id,paper_slug,name,statement,"
+            "proof_sketch,techniques_used,created_at) VALUES(?,?,?,?,?,?,?)",
+            ("2110.1", "slug", f"Theorem {i}", "X.", "s", "[]",
+             "2026-01-01T00:00:00"),
+        )
+    conn.execute("INSERT INTO meta(key,value) VALUES('schema_version','1')")
+    conn.commit(); conn.close()
+
+    from paper_distiller.proofs.store import ProofStore
+    ProofStore(db).close()   # first open: migrates + backfills 2 theorem nodes
+    ProofStore(db).close()   # second open: version already 2 -> backfill skipped
+    s = ProofStore(db)       # third open
+    theorem_nodes = s._conn.execute(
+        "SELECT COUNT(*) FROM nodes WHERE kind='theorem'").fetchone()[0]
+    assert theorem_nodes == 2  # not 4, not 6
+    s.close()
+
+
+def test_add_and_get_node(tmp_path):
+    from paper_distiller.proofs.store import ProofStore, Node
+    store = ProofStore(tmp_path / "proofs.db")
+    nid = store.add_node(Node(
+        paper_arxiv_id="2110.1", kind="proof_step", text="By Hölder, A<=B.",
+        label="Step (a)", source_quote="By Hölder, A<=B.", loc='{"sec":"3.2"}',
+        techniques=["Hölder"], ord=1,
+    ))
+    assert isinstance(nid, int)
+    got = store.get_node(nid)
+    assert got.id == nid
+    assert got.kind == "proof_step"
+    assert got.techniques == ["Hölder"]
+    assert got.status == "extracted"
+    by_paper = store.nodes_by_paper("2110.1")
+    assert [n.id for n in by_paper] == [nid]
+    store.close()
+
+
+def test_add_edge_idempotent_and_query(tmp_path):
+    from paper_distiller.proofs.store import ProofStore, Node, Edge
+    store = ProofStore(tmp_path / "proofs.db")
+    a = store.add_node(Node(paper_arxiv_id="p", kind="proof_step", text="step a"))
+    b = store.add_node(Node(paper_arxiv_id="p", kind="assumption", text="A2"))
+    store.add_edge(Edge(src_id=a, dst_id=b, rel="uses_assumption"))
+    store.add_edge(Edge(src_id=a, dst_id=b, rel="uses_assumption"))  # dup
+    out = store.out_edges(a)
+    assert len(out) == 1  # UNIQUE(src,dst,rel) collapses the dup
+    assert out[0].dst_id == b and out[0].rel == "uses_assumption"
+    assert [e.src_id for e in store.in_edges(b)] == [a]
+    store.close()
+
+
+def test_search_nodes_and_by_technique(tmp_path):
+    from paper_distiller.proofs.store import ProofStore, Node
+    store = ProofStore(tmp_path / "proofs.db")
+    store.add_node(Node(paper_arxiv_id="p", kind="proof_step",
+                        text="Bound the empirical process via Dudley chaining.",
+                        techniques=["Dudley chaining"]))
+    store.add_node(Node(paper_arxiv_id="p", kind="proof_step",
+                        text="Apply Hölder inequality to split the product.",
+                        techniques=["Hölder"]))
+    hits = store.search_nodes("chaining")
+    assert len(hits) == 1 and "Dudley" in hits[0].text
+    by_tech = store.nodes_using_technique("Hölder")
+    assert len(by_tech) == 1 and "Hölder" in by_tech[0].text
+    store.close()
+
+
+def test_dependency_walk(tmp_path):
+    from paper_distiller.proofs.store import ProofStore, Node, Edge
+    store = ProofStore(tmp_path / "proofs.db")
+    thm = store.add_node(Node(paper_arxiv_id="p", kind="theorem", text="T"))
+    s2 = store.add_node(Node(paper_arxiv_id="p", kind="proof_step", text="step2"))
+    s1 = store.add_node(Node(paper_arxiv_id="p", kind="proof_step", text="step1"))
+    store.add_edge(Edge(src_id=thm, dst_id=s2, rel="depends_on"))
+    store.add_edge(Edge(src_id=s2,  dst_id=s1, rel="depends_on"))
+    walked = store.dependency_walk(thm)
+    walked_ids = [n.id for n in walked]
+    assert walked_ids == [s2, s1]  # transitive deps, BFS order, excludes the root
+    # Cycle safety: add a back-edge and ensure it still terminates.
+    store.add_edge(Edge(src_id=s1, dst_id=thm, rel="depends_on"))
+    assert len(store.dependency_walk(thm)) <= 3
+    store.close()
+
+
+def test_delete_paper_graph(tmp_path):
+    from paper_distiller.proofs.store import ProofStore, Node, Edge
+    store = ProofStore(tmp_path / "proofs.db")
+    a = store.add_node(Node(paper_arxiv_id="keep", kind="theorem", text="K"))
+    b = store.add_node(Node(paper_arxiv_id="drop", kind="theorem", text="D",
+                            techniques=["Hölder"]))
+    c = store.add_node(Node(paper_arxiv_id="drop", kind="proof_step", text="d-step"))
+    store.add_edge(Edge(src_id=b, dst_id=c, rel="depends_on"))
+    store.delete_paper_graph("drop")
+    assert [n.id for n in store.nodes_by_paper("drop")] == []
+    assert [n.id for n in store.nodes_by_paper("keep")] == [a]
+    # edges + node_techniques for the dropped paper are gone too
+    assert store._conn.execute("SELECT COUNT(*) FROM edges").fetchone()[0] == 0
+    assert store._conn.execute(
+        "SELECT COUNT(*) FROM node_techniques").fetchone()[0] == 0
+    store.close()
+
+
+def test_set_node_status(tmp_path):
+    """set_node_status updates an existing node's status; get_node reflects it."""
+    from paper_distiller.proofs.store import ProofStore, Node
+    store = ProofStore(tmp_path / "proofs.db")
+    nid = store.add_node(Node(
+        paper_arxiv_id="p", kind="proof_step", text="A step.",
+    ))
+    assert store.get_node(nid).status == "extracted"
+    store.set_node_status(nid, "gap")
+    assert store.get_node(nid).status == "gap"
+    store.set_node_status(nid, "suspicious")
+    assert store.get_node(nid).status == "suspicious"
+    store.close()
+
+
+def test_theorem_layer_unchanged_after_graph_migration(tmp_path):
+    """Existing theorem ingestion + queries still work identically with v2 schema."""
+    from paper_distiller.proofs.store import ProofStore
+    store = ProofStore(tmp_path / "proofs.db")
+    store.ingest_sidecar(_sample_sidecar(), "2110.12319", paper_slug="bigan-bounds")
+    assert store.theorem_count() == 2
+    assert store.technique_count() == 5
+    assert store.paper_count() == 1
+    assert len(store.theorems_using_technique("Hölder")) == 1
+    assert len(store.search_theorems("Bernstein")) >= 1
+    assert len(store.theorems_by_paper("2110.12319")) == 2
+    assert "Hölder" in store.list_canonical_technique_names()
+    store.close()
