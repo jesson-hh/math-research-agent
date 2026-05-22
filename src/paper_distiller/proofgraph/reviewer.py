@@ -12,6 +12,7 @@ caveat — LLM judges are near-chance on proof soundness.
 from __future__ import annotations
 
 import json
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -163,3 +164,48 @@ def review_node(store: "ProofStore", node: "Node", llm) -> ReviewResult:
             reason="review inconclusive",
             confidence=0.0,
         )
+
+
+# ---------------------------------------------------------------------------
+# Task 6.2: compute_taint
+# ---------------------------------------------------------------------------
+
+def compute_taint(
+    store: "ProofStore",
+    node_ids: list[int],
+    label_by_id: dict[int, str],
+) -> dict[int, list[int]]:
+    """For each node, find problem-label depends_on ancestors transitively.
+
+    Returns a dict mapping node_id → sorted list of ancestor ids whose label
+    is in PROBLEM. Only nodes that ARE tainted (have at least one such
+    ancestor) appear in the result. The problem node itself is NOT included
+    (it's the source, not tainted by an ancestor).
+
+    Cycle-safe via a visited set per walk.
+    """
+    taint: dict[int, list[int]] = {}
+    node_id_set = set(node_ids)
+
+    for nid in node_ids:
+        # BFS over depends_on ancestors
+        visited: set[int] = {nid}
+        queue: deque[int] = deque([nid])
+        problem_ancestors: list[int] = []
+
+        while queue:
+            cur = queue.popleft()
+            for edge in store.out_edges(cur, "depends_on"):
+                anc = edge.dst_id
+                if anc in visited:
+                    continue
+                visited.add(anc)
+                # Only care about ancestors within our reviewed set
+                if anc in node_id_set and label_by_id.get(anc) in PROBLEM:
+                    problem_ancestors.append(anc)
+                queue.append(anc)
+
+        if problem_ancestors:
+            taint[nid] = sorted(problem_ancestors)
+
+    return taint
