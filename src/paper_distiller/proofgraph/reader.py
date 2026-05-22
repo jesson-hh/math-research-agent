@@ -29,8 +29,6 @@ _HEADING_RE = re.compile(r"^\s*(\d+(\.\d+)*\s+\S.*|Appendix\s+\S.*)$")
 _THEOREM_RE = re.compile(
     r"^\s*(Theorem|Lemma|Proposition|Corollary|Claim|Definition)\b", re.IGNORECASE)
 _PROOF_START_RE = re.compile(r"^\s*Proof\b", re.IGNORECASE)
-# End-of-proof markers: QED box, "QED", "q.e.d."
-_PROOF_END_RE = re.compile(r"(□|\bQED\b|\bq\.?e\.?d\.?\b)", re.IGNORECASE)
 
 
 def _classify(block: str) -> str:
@@ -125,20 +123,66 @@ def verify_quote(
     hay = _norm_ws(segment_text)
     if q in hay:
         return GateResult(ok=True, score=1.0, matched_span=q)
-    # Fuzzy: slide a window the length of the quote across the haystack.
+    # Fuzzy: slide fixed-size windows (by word boundaries) across the haystack.
+    # We use two target character lengths — qlen and 1.3*qlen — so we don't
+    # miss the best alignment when the quote has slightly different whitespace
+    # than the source.  ONE SequenceMatcher is reused across all windows
+    # (set_seq1 is called once; set_seq2 is called per window), avoiding the
+    # O(words²) fresh-construction cost of the original loop.
     words = hay.split(" ")
     qlen = len(q)
+    target_lens = (qlen, int(1.3 * qlen))
     best = 0.0
     best_span: str | None = None
-    # Build candidate windows by character length around the quote length.
-    for i in range(len(words)):
-        window = ""
-        j = i
-        while j < len(words) and len(window) < qlen + 20:
-            window = (window + " " + words[j]).strip()
-            j += 1
-            ratio = SequenceMatcher(None, q, window).ratio()
+
+    # Pre-build the word-start character offsets so we can slice windows
+    # directly from `hay` rather than re-joining word lists each iteration.
+    word_starts: list[int] = []
+    pos = 0
+    for w in words:
+        word_starts.append(pos)
+        pos += len(w) + 1  # +1 for the space separator
+
+    sm = SequenceMatcher(autojunk=False)
+    sm.set_seq1(q)
+    # Length-ratio bound: ratio() <= 2*min(|a|,|b|)/(|a|+|b|), so if
+    # len(window)/qlen is too far from 1 the score cannot reach `threshold`.
+    # We derive the allowed window-length range from this inequality.
+    lo_len = int(qlen * threshold / (2.0 - threshold)) + 1
+    hi_len = int(qlen * (2.0 - threshold) / threshold)
+
+    nw = len(words)
+    for target in target_lens:
+        # For each word-start position i, find the ending word index j such
+        # that the window [word_starts[i], word_starts[j]+len(words[j])]
+        # has character length >= target.  Keep a running right pointer to
+        # avoid O(words²) inner loops.
+        j = 0
+        for i in range(nw):
+            if j < i:
+                j = i
+            # Advance j until window length >= target or we exhaust words.
+            while j < nw - 1 and (word_starts[j] + len(words[j]) - word_starts[i]) < target:
+                j += 1
+            win_end = word_starts[j] + len(words[j])
+            win_len = win_end - word_starts[i]
+            # Length-ratio pre-filter: skip windows whose length cannot
+            # possibly produce a ratio >= max(best, threshold).
+            if win_len < lo_len or win_len > hi_len:
+                continue
+            window = hay[word_starts[i]:win_end]
+            if not window:
+                continue
+            sm.set_seq2(window)
+            if sm.quick_ratio() < max(best, threshold):
+                continue
+            ratio = sm.ratio()
             if ratio > best:
                 best, best_span = ratio, window
+                if best == 1.0:
+                    break
+        if best == 1.0:
+            break
+
     return GateResult(ok=best >= threshold, score=round(best, 3),
                       matched_span=best_span if best >= threshold else None)

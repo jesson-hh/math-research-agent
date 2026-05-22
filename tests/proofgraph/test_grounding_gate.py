@@ -35,3 +35,9 @@ def test_empty_quote_rejected():
     from paper_distiller.proofgraph.reader import verify_quote
     assert not verify_quote("", SEG).ok
     assert not verify_quote("   ", SEG).ok
+
+
+def test_short_repeated_tokens_rejected():
+    from paper_distiller.proofgraph.reader import verify_quote
+    assert not verify_quote("the the", SEG).ok
+    assert not verify_quote("inequality inequality inequality", SEG).ok
