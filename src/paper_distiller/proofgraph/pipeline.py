@@ -17,7 +17,7 @@ Design constraints (from spec §5):
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from ..proofs.store import Edge, Node, ProofStore
 from .extractor import extract_segment, self_check
