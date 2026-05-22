@@ -13,7 +13,6 @@ Per-paper LLM failures are logged + dropped — they don't abort the run.
 from __future__ import annotations
 
 import asyncio
-import re
 import tempfile
 from pathlib import Path
 
