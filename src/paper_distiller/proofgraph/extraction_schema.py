@@ -26,11 +26,16 @@ class ExtractedNode:
     ``status`` is mutable: the grounding gate sets it to ``"unsupported"`` for
     nodes whose ``source_quote`` cannot be verified; the self-check pass sets it
     to ``"suspicious"`` for nodes that claim beyond the segment text.
+
+    ``key`` is a short local identifier (e.g. ``"n1"``) assigned by the LLM
+    within a single extraction response, used to resolve intra-proof step refs
+    without requiring a formal label.
     """
     kind: str
     text: str
     source_quote: str
     label: str | None = None
+    key: str | None = None
     techniques: list[str] = field(default_factory=list)
     refs: list[ExtractedRef] = field(default_factory=list)
     status: str = "extracted"
@@ -58,6 +63,10 @@ def _parse_node(raw: dict) -> ExtractedNode | None:
     if not isinstance(label, str) or not label.strip():
         label = None
 
+    key = raw.get("key")
+    if not isinstance(key, str) or not key.strip():
+        key = None
+
     # techniques: must be list of strings; coerce otherwise
     raw_techs = raw.get("techniques")
     if isinstance(raw_techs, list):
@@ -82,6 +91,7 @@ def _parse_node(raw: dict) -> ExtractedNode | None:
         text=text,
         source_quote=source_quote,
         label=label,
+        key=key,
         techniques=techniques,
         refs=refs,
         status="extracted",

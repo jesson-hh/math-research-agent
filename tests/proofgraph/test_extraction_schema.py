@@ -95,3 +95,24 @@ def test_default_status_is_extracted():
     raw = '{"nodes":[{"kind":"proof_step","text":"t","source_quote":"q"}]}'
     result = parse_extraction(raw)
     assert result[0].status == "extracted"
+
+
+# ---------------------------------------------------------------------------
+# Fix 1: per-node local key
+# ---------------------------------------------------------------------------
+
+def test_parse_key_present():
+    """A node JSON with "key":"n1" must parse into ExtractedNode.key == "n1"."""
+    from paper_distiller.proofgraph.extraction_schema import parse_extraction
+    raw = '{"nodes":[{"kind":"proof_step","text":"t","source_quote":"q","key":"n1"}]}'
+    result = parse_extraction(raw)
+    assert len(result) == 1
+    assert result[0].key == "n1"
+
+
+def test_parse_key_missing_defaults_to_none():
+    """A node JSON without "key" must parse into ExtractedNode.key == None."""
+    from paper_distiller.proofgraph.extraction_schema import parse_extraction
+    raw = '{"nodes":[{"kind":"proof_step","text":"t","source_quote":"q"}]}'
+    result = parse_extraction(raw)
+    assert result[0].key is None
