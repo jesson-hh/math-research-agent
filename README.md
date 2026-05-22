@@ -6,7 +6,7 @@
 [![PyPI version](https://img.shields.io/pypi/v/paper-distiller.svg)](https://pypi.org/project/paper-distiller/)
 [![Python versions](https://img.shields.io/pypi/pyversions/paper-distiller.svg)](https://pypi.org/project/paper-distiller/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-555_passing-brightgreen.svg)](#)
+[![Tests](https://img.shields.io/badge/tests-568_passing-brightgreen.svg)](#)
 
 paper-distiller is a **conversational research agent** that talks to you in natural language, decides which of 8 LLM-callable tools to use, and turns arXiv papers into a deeply-distilled, cross-referenced markdown knowledge base.
 
@@ -62,7 +62,7 @@ Requires Python **3.10+**. From source:
 git clone https://github.com/jesson-hh/paper-distiller
 cd paper-distiller
 pip install -e ".[dev]"
-pytest -v       # 555 tests should pass
+pytest -v       # 568 tests should pass
 ```
 
 Optional: install [LLMLingua](https://github.com/microsoft/LLMLingua) for prompt compression during proof extraction:

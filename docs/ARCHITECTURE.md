@@ -201,7 +201,7 @@ When active, `build_graph_for_paper` segments the text (`reader.segment`), runs 
 | `reader.py` | `segment(text)` — LLM-free splitting into `Segment` objects. `verify_quote(quote, seg)` — grounding gate (SequenceMatcher similarity check) |
 | `extractor.py` | `extract_segment(seg, memory, llm, depth)` — LLM call, returns accepted `ExtractedNode`s + rejected count. `self_check(seg, nodes, llm)` — second-pass hallucination filter |
 | `pipeline.py` | `build_graph_for_paper` — full pipeline (delete → segment → extract loop → edge resolution → CoverageReport). `maybe_build_graph` — gated entry point for `_DistillOne` |
-| `linker.py` | `find_candidates` / `classify_pair` / `link_paper` — cross-paper edge detection (finds `same_as` / `specializes` / `cites` links between nodes in different papers) |
+| `linker.py` | `find_candidates` / `classify_pair` / `link_paper` — cross-paper edge detection (finds `same_as` / `specializes` / `generalizes` / `uses_lemma` / `contradicts` links between nodes in different papers) |
 | `reviewer.py` | `review_node(store, node, llm)` — LLM judgment (ok/suspicious/gap/unsupported/unstated) with confidence capped at 0.7. `compute_taint(store, ids, label_by_id)` — propagates problem labels down the `depends_on` DAG. `review_target(store, *, paper_arxiv_id, node_id, llm)` — orchestrates a full paper or subtree review + returns `ReviewReport` |
 | `compress.py` | `compress(text, target_ratio)` — optional LLMLingua wrapper; identity passthrough if `llmlingua` is not installed |
 | `memory.py` | `RunningMemory` — rolling context of recent nodes, passed between segments so the extractor can reference already-extracted labels |
@@ -249,7 +249,7 @@ Any OpenAI-compatible endpoint works: Aliyun Bailian (recommended), DeepSeek, Op
 
 ## Testing
 
-555 tests across `tests/` (run `pytest -q`):
+568 tests across `tests/` (run `pytest -q`):
 
 - `tests/agents/` — per-agent unit tests + framework primitives
 - `tests/chat/` — AgentLoop, REPL, CLI dispatch, qa_runner, research_runner
