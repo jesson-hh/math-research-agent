@@ -35,3 +35,8 @@ MagicMock/
 scripts/diag_proofs.db
 scripts/diag_proofs.db-*
 scripts/diag_distill_output.md
+scripts/diag_*.py
+
+# Local scratch & demo-run artifacts (root-level underscore-prefixed throwaways)
+/_*.py
+/_*.log
