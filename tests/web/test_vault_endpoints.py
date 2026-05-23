@@ -306,6 +306,50 @@ class TestVaultArticles:
         assert r.status_code == 400
 
 
+# ── C1: arxiv_id falls back to refs[] when arxiv_id key absent ───────────────
+
+_FM_REFS_ONLY = """\
+---
+title: "Refs Only Paper"
+tags: []
+refs: [arxiv:1234.5678]
+created: "2024-04-01T00:00:00"
+updated: "2024-04-01T00:00:00"
+---
+
+Body text here.
+"""
+
+
+class TestArxivIdFromRefs:
+    """C1 — arxiv_id must be populated from refs[] when the arxiv_id key is absent."""
+
+    @pytest.fixture
+    def refs_vault(self, tmp_path):
+        vault = tmp_path / "vault"
+        (vault / "articles").mkdir(parents=True)
+        md = vault / "articles" / "refs-only-paper.md"
+        md.write_text(_FM_REFS_ONLY, encoding="utf-8")
+        return vault
+
+    @pytest.fixture
+    def refs_client(self, refs_vault):
+        app = create_app(str(refs_vault))
+        return TestClient(app, raise_server_exceptions=True)
+
+    def test_article_arxiv_id_from_refs(self, refs_client):
+        r = refs_client.get("/vault/article/articles/refs-only-paper")
+        assert r.status_code == 200
+        assert r.json()["arxiv_id"] == "1234.5678"
+
+    def test_recent_arxiv_id_from_refs(self, refs_client):
+        r = refs_client.get("/vault/recent")
+        assert r.status_code == 200
+        items = r.json()["recent"]
+        assert len(items) == 1
+        assert items[0]["arxiv_id"] == "1234.5678"
+
+
 # ── /vault/graph/{paper_arxiv_id} ────────────────────────────────────────────
 
 class TestVaultGraph:

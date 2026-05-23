@@ -65,6 +65,26 @@ def _parse_frontmatter(text: str) -> tuple[dict, str]:
     return meta, body
 
 
+def _arxiv_id_from_meta(meta: dict) -> str:
+    """Return arxiv id from frontmatter.
+
+    Tries ``arxiv_id`` key first; falls back to the first entry in ``refs``
+    that starts with ``"arxiv:"`` (strips the prefix).
+    """
+    direct = meta.get("arxiv_id", "")
+    if direct:
+        return str(direct)
+    refs = meta.get("refs", [])
+    if isinstance(refs, str):
+        refs = [r.strip() for r in refs.split(",") if r.strip()]
+    if isinstance(refs, list):
+        for ref in refs:
+            s = str(ref).strip()
+            if s.startswith("arxiv:"):
+                return s[len("arxiv:"):]
+    return ""
+
+
 def _vault_path_from(request: Request, vault_path: str) -> str:
     return vault_path or getattr(request.app.state, "vault_path", "")
 
@@ -149,14 +169,14 @@ async def vault_recent(
                 text = md.read_text(encoding="utf-8", errors="replace")
                 meta, _ = _parse_frontmatter(text)
                 title = meta.get("title", md.stem)
-                arxiv_id = meta.get("arxiv_id", "")
+                arxiv_id = _arxiv_id_from_meta(meta)
                 updated = meta.get("updated") or meta.get("created") or ""
                 slug = md.stem
                 items.append({
                     "slug": slug,
                     "title": str(title),
                     "category": cat,
-                    "arxiv_id": str(arxiv_id),
+                    "arxiv_id": arxiv_id,
                     "updated": str(updated),
                 })
             except Exception:
@@ -194,7 +214,7 @@ async def vault_article(
 
     # Proof stats from proof store
     proof_stats = {"nodes": 0, "suspicious": 0, "gap": 0}
-    arxiv_id = str(meta.get("arxiv_id", ""))
+    arxiv_id = _arxiv_id_from_meta(meta)
     db_path = root / ".proof_store" / "proofs.db"
     if arxiv_id and db_path.exists():
         try:
@@ -231,7 +251,7 @@ async def vault_article(
         "title": str(meta.get("title", slug)),
         "tags": tags if isinstance(tags, list) else [],
         "refs": refs if isinstance(refs, list) else [],
-        "arxiv_id": str(meta.get("arxiv_id", "")),
+        "arxiv_id": arxiv_id,
         "body": body,
         "frontmatter": {k: v for k, v in meta.items()},
         "created": str(meta.get("created", "")),
