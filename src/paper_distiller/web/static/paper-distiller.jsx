@@ -929,6 +929,11 @@ function App() {
             if (event.name === "search" && event.args && event.args.topic) {
               lastSearchTopicRef.current = event.args.topic;
             }
+            // Open dashboard immediately when research starts (long-running)
+            if (event.name === "research") {
+              setHasDashboard(true);
+              setTab("dashboard");
+            }
             addMsg({ id: tmId, type: "tool", name: event.name, status: "running", args: event.args, results: null });
             break;
           }
@@ -964,13 +969,6 @@ function App() {
           case "done":
             setHistory(event.history || []);
             updateMsg(asstId, { streaming: false });
-            // If research tool was used, show dashboard
-            if (event.history && event.history.some(m =>
-              m.role === "tool" && m.content && m.content.includes("research_session_id")
-            )) {
-              setHasDashboard(true);
-              setTab("dashboard");
-            }
             break;
 
           case "error":
