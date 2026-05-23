@@ -10,6 +10,9 @@ from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from ..agent_stream import agent_event_stream
+from ...llm.openai_compatible import LLMClient
+
 router = APIRouter(prefix="/chat")
 
 
@@ -21,9 +24,6 @@ class ChatRequest(BaseModel):
 
 async def _event_generator(body: ChatRequest, vault_path: str):
     """Async generator that yields SSE-formatted bytes."""
-    from ..agent_stream import agent_event_stream  # noqa: PLC0415
-    from ...llm.openai_compatible import LLMClient  # noqa: PLC0415
-
     api_key = os.getenv("PD_API_KEY", "")
     base_url = os.getenv("PD_BASE_URL", "")
     model = os.getenv("PD_MODEL", "")
