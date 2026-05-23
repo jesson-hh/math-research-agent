@@ -407,37 +407,197 @@ function ArticleView({ slug, category, articleFlash, onOpenGraph, onOpenPaper })
 }
 
 // ───────────────────────────────────────────────────────────
-// PAPER VIEW — Phase 2 placeholder (PDF rendering deferred)
+// PAPER VIEW — Phase 2: real PDF.js-backed viewer
 
-function PaperView({ arxivId }) {
+function PaperView({ arxivId, jumpToPage }) {
   const id = arxivId || "";
-  return (
-    <div className="paper-wrap">
-      <div className="paper-toolbar">
-        <div className="paper-tb-left">
-          <span className="paper-pageinfo"><i>PDF 视图</i></span>
-        </div>
-        <div className="paper-tb-right">
-          {id && <span className="paper-tb-src">arxiv.org / {id}</span>}
+
+  // PDF.js document object
+  const [pdf, setPdf] = useState(null);
+  const [numPages, setNumPages] = useState(0);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [zoom, setZoom] = useState(1.2);
+  // "idle" | "loading" | "ready" | "error"
+  const [loadState, setLoadState] = useState("idle");
+
+  const canvasRef = useRef(null);
+  // Track the in-flight render task so we can cancel it if page/zoom changes
+  const renderTaskRef = useRef(null);
+  // Track loading task so we can cancel on arxivId change
+  const loadingTaskRef = useRef(null);
+
+  // ── Load PDF when arxivId changes ──────────────────────────────────────────
+  useEffect(() => {
+    if (!id) {
+      setPdf(null);
+      setLoadState("idle");
+      return;
+    }
+    if (!window.pdfjsLib) {
+      setLoadState("error");
+      return;
+    }
+
+    // Cancel any in-flight load
+    if (loadingTaskRef.current) {
+      loadingTaskRef.current.destroy();
+      loadingTaskRef.current = null;
+    }
+
+    setLoadState("loading");
+    setPdf(null);
+    setCurrentPage(1);
+    setNumPages(0);
+
+    const vaultPath = VAULT_PATH || "";
+    const url = `/paper/${encodeURIComponent(id)}.pdf${vaultPath ? "?vault_path=" + encodeURIComponent(vaultPath) : ""}`;
+    const task = window.pdfjsLib.getDocument(url);
+    loadingTaskRef.current = task;
+
+    task.promise.then(
+      (doc) => {
+        loadingTaskRef.current = null;
+        setPdf(doc);
+        setNumPages(doc.numPages);
+        setLoadState("ready");
+      },
+      (err) => {
+        loadingTaskRef.current = null;
+        if (err && err.name === "AbortException") return; // cancelled
+        setLoadState("error");
+      }
+    );
+
+    return () => {
+      if (loadingTaskRef.current) {
+        loadingTaskRef.current.destroy();
+        loadingTaskRef.current = null;
+      }
+    };
+  }, [id]);
+
+  // ── Handle external jump-to-page ──────────────────────────────────────────
+  useEffect(() => {
+    if (jumpToPage !== null && jumpToPage !== undefined && numPages > 0) {
+      const clamped = Math.max(1, Math.min(numPages, jumpToPage));
+      setCurrentPage(clamped);
+    }
+  }, [jumpToPage, numPages]);
+
+  // ── Render current page onto canvas ───────────────────────────────────────
+  useEffect(() => {
+    if (!pdf || loadState !== "ready" || !canvasRef.current) return;
+
+    // Cancel previous render
+    if (renderTaskRef.current) {
+      renderTaskRef.current.cancel();
+      renderTaskRef.current = null;
+    }
+
+    pdf.getPage(currentPage).then((page) => {
+      const viewport = page.getViewport({ scale: zoom });
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const ctx = canvas.getContext("2d");
+      canvas.width = viewport.width;
+      canvas.height = viewport.height;
+
+      const renderTask = page.render({ canvasContext: ctx, viewport });
+      renderTaskRef.current = renderTask;
+      renderTask.promise.then(
+        () => { renderTaskRef.current = null; },
+        (err) => {
+          renderTaskRef.current = null;
+          if (err && err.name !== "RenderingCancelledException") {
+            // eslint-disable-next-line no-console
+            console.warn("PDF render error:", err);
+          }
+        }
+      );
+    });
+  }, [pdf, currentPage, zoom, loadState]);
+
+  // ── Toolbar actions ───────────────────────────────────────────────────────
+  const prevPage = () => setCurrentPage(p => Math.max(1, p - 1));
+  const nextPage = () => setCurrentPage(p => Math.min(numPages, p + 1));
+  const zoomOut = () => setZoom(z => Math.max(0.4, parseFloat((z - 0.2).toFixed(1))));
+  const zoomIn  = () => setZoom(z => Math.min(4.0, parseFloat((z + 0.2).toFixed(1))));
+
+  const onPageInput = (e) => {
+    const n = parseInt(e.target.value, 10);
+    if (!isNaN(n)) setCurrentPage(Math.max(1, Math.min(numPages, n)));
+  };
+
+  // ── Render ────────────────────────────────────────────────────────────────
+  if (!id) {
+    return (
+      <div className="paper-wrap">
+        <div className="paper-scroll" style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: 320 }}>
+          <p style={{ color: "var(--ink-3)", fontFamily: "var(--serif)" }}>打开一篇文章后再查看 PDF。</p>
         </div>
       </div>
-      <div className="paper-scroll" style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: 320 }}>
-        <div style={{ textAlign: "center", padding: 40, color: "var(--ink-3)" }}>
-          <div style={{ fontSize: 32, marginBottom: 12 }}>📄</div>
-          <p style={{ fontFamily: "var(--serif)", fontSize: 15, marginBottom: 12 }}>
-            PDF 视图正在 Phase 2 中,先看 arXiv 原文 ↗
-          </p>
-          {id && (
-            <a
-              href={`https://arxiv.org/abs/${id}`}
-              target="_blank"
-              rel="noreferrer"
-              style={{ color: "var(--accent)", fontFamily: "var(--mono)", fontSize: 13 }}
-            >
-              arxiv.org/abs/{id}
-            </a>
-          )}
+    );
+  }
+
+  return (
+    <div className="paper-wrap">
+      {/* Toolbar */}
+      <div className="paper-toolbar">
+        <div className="paper-tb-left">
+          <button className="paper-tb-btn" onClick={prevPage} disabled={currentPage <= 1 || loadState !== "ready"} title="上一页">‹</button>
+          <span className="paper-pageinfo">
+            {loadState === "ready"
+              ? (<>
+                  <input
+                    type="number"
+                    min={1}
+                    max={numPages}
+                    value={currentPage}
+                    onChange={onPageInput}
+                    style={{ width: 44, textAlign: "center", fontFamily: "var(--mono)", fontSize: 12, border: "1px solid var(--border)", borderRadius: 3, padding: "1px 2px" }}
+                  />
+                  {" "}<span style={{ color: "var(--ink-3)" }}>/ {numPages}</span>
+                </>)
+              : <i style={{ color: "var(--ink-3)", fontSize: 12 }}>{loadState === "loading" ? "加载中…" : loadState === "error" ? "加载失败" : "—"}</i>
+            }
+          </span>
+          <button className="paper-tb-btn" onClick={nextPage} disabled={currentPage >= numPages || loadState !== "ready"} title="下一页">›</button>
+          <span style={{ width: 8 }} />
+          <button className="paper-tb-btn" onClick={zoomOut} title="缩小">−</button>
+          <span className="paper-pageinfo" style={{ minWidth: 40, textAlign: "center", fontFamily: "var(--mono)", fontSize: 12 }}>{Math.round(zoom * 100)}%</span>
+          <button className="paper-tb-btn" onClick={zoomIn} title="放大">+</button>
         </div>
+        <div className="paper-tb-right">
+          <a
+            href={`https://arxiv.org/abs/${id}`}
+            target="_blank"
+            rel="noreferrer"
+            className="paper-tb-src"
+            title="在 arXiv 上打开"
+          >↗ arxiv.org/abs/{id}</a>
+        </div>
+      </div>
+
+      {/* Canvas area */}
+      <div className="paper-scroll" style={{ overflow: "auto", flex: 1 }}>
+        {loadState === "loading" && (
+          <div style={{ padding: 40, textAlign: "center", color: "var(--ink-3)", fontFamily: "var(--serif)" }}>PDF 加载中…</div>
+        )}
+        {loadState === "error" && (
+          <div style={{ padding: 40, textAlign: "center" }}>
+            <p style={{ color: "var(--accent)", fontFamily: "var(--serif)", marginBottom: 12 }}>PDF 加载失败</p>
+            <a href={`https://arxiv.org/abs/${id}`} target="_blank" rel="noreferrer" style={{ color: "var(--accent)", fontFamily: "var(--mono)", fontSize: 13 }}>
+              arxiv.org/abs/{id} ↗
+            </a>
+          </div>
+        )}
+        {loadState === "ready" && (
+          <div style={{ display: "flex", justifyContent: "center", padding: "16px 0" }}>
+            <canvas ref={canvasRef} style={{ boxShadow: "0 2px 12px rgba(0,0,0,0.18)", borderRadius: 2 }} />
+          </div>
+        )}
+        {/* Mount canvas in DOM even during loading so ref is stable */}
+        {loadState === "loading" && <canvas ref={canvasRef} style={{ display: "none" }} />}
       </div>
     </div>
   );
