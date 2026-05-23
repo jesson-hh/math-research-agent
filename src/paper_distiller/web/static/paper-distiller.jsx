@@ -313,7 +313,7 @@ function WelcomeView({ onPick, onOpenArticle }) {
       <div className="recent-list">
         {recent.length === 0 && <div style={{ color: "var(--ink-3)", fontSize: 13 }}>暂无最近文章 — 先蒸馏几篇试试</div>}
         {recent.map((r, i) => (
-          <div key={i} className="recent-item" onClick={() => onOpenArticle && onOpenArticle(r.slug, r.category)}>
+          <div key={i} className="recent-item" onClick={() => onOpenArticle && onOpenArticle(r.slug, r.category, r.arxiv_id)}>
             <span className="recent-title">{r.title}</span>
             <span className="recent-meta">{r.arxiv_id}{r.updated ? " · " + r.updated.slice(0, 10) : ""}</span>
           </div>
@@ -326,7 +326,13 @@ function WelcomeView({ onPick, onOpenArticle }) {
 // ───────────────────────────────────────────────────────────
 // WORKSPACE — article view (wired to /vault/article/{category}/{slug})
 
-function ArticleView({ slug, category, articleFlash, onOpenGraph, onOpenPaper }) {
+// Scan text for the first "p. N" reference and return the page number or null.
+function _findPageRef(text) {
+  const m = /p\.\s*(\d+)/.exec(text);
+  return m ? parseInt(m[1], 10) : null;
+}
+
+function ArticleView({ slug, category, articleFlash, onOpenGraph, onOpenPaper, jumpToPaperPage, onArticleLoaded }) {
   const [article, setArticle] = useState(null);
   const [error, setError] = useState(null);
 
@@ -335,7 +341,7 @@ function ArticleView({ slug, category, articleFlash, onOpenGraph, onOpenPaper })
     setArticle(null);
     setError(null);
     apiFetch(`/vault/article/${category || "articles"}/${slug}`)
-      .then(setArticle)
+      .then(data => { setArticle(data); onArticleLoaded && onArticleLoaded(data); })
       .catch(e => setError(String(e)));
   }, [slug, category]);
 
@@ -374,15 +380,49 @@ function ArticleView({ slug, category, articleFlash, onOpenGraph, onOpenPaper })
         {tags.map(t => <span key={t} className="tag">{t}</span>)}
       </div>
 
-      {sections.map((sec, i) => (
-        <div key={i} data-section={sec.heading} className={"article-section" + (articleFlash === sec.heading ? " sec-flash" : "")}>
-          {sec.heading && <h3><span>{sec.heading}</span></h3>}
-          {sec.paras.map((p, j) => {
-            if (p.type === "h3") return <h4 key={j}>{p.text}</h4>;
-            return <p key={j}><RichText>{p.text}</RichText></p>;
-          })}
-        </div>
-      ))}
+      {sections.map((sec, i) => {
+        // Find first p. N ref in any paragraph of this section (heuristic for jump pill)
+        const pageRef = sec.paras.reduce((found, p) => {
+          if (found !== null) return found;
+          return _findPageRef(p.text);
+        }, null);
+
+        return (
+          <div key={i} data-section={sec.heading} className={"article-section" + (articleFlash === sec.heading ? " sec-flash" : "")}>
+            {sec.heading && (
+              <h3>
+                <span>{sec.heading}</span>
+                {pageRef !== null && jumpToPaperPage && (
+                  <button
+                    className="page-pill"
+                    onClick={() => jumpToPaperPage(pageRef)}
+                    title={`跳到 PDF 第 ${pageRef} 页`}
+                    style={{
+                      marginLeft: 8,
+                      fontSize: 11,
+                      fontFamily: "var(--mono)",
+                      background: "var(--accent)",
+                      color: "#fff",
+                      border: "none",
+                      borderRadius: 3,
+                      padding: "1px 6px",
+                      cursor: "pointer",
+                      verticalAlign: "middle",
+                      opacity: 0.85,
+                    }}
+                  >
+                    ↗ p.{pageRef}
+                  </button>
+                )}
+              </h3>
+            )}
+            {sec.paras.map((p, j) => {
+              if (p.type === "h3") return <h4 key={j}>{p.text}</h4>;
+              return <p key={j}><RichText>{p.text}</RichText></p>;
+            })}
+          </div>
+        );
+      })}
 
       {(ps.nodes > 0) && (
         <div className="notice" style={{ marginTop: 32 }}>
@@ -407,37 +447,197 @@ function ArticleView({ slug, category, articleFlash, onOpenGraph, onOpenPaper })
 }
 
 // ───────────────────────────────────────────────────────────
-// PAPER VIEW — Phase 2 placeholder (PDF rendering deferred)
+// PAPER VIEW — Phase 2: real PDF.js-backed viewer
 
-function PaperView({ arxivId }) {
+function PaperView({ arxivId, jumpToPage }) {
   const id = arxivId || "";
-  return (
-    <div className="paper-wrap">
-      <div className="paper-toolbar">
-        <div className="paper-tb-left">
-          <span className="paper-pageinfo"><i>PDF 视图</i></span>
-        </div>
-        <div className="paper-tb-right">
-          {id && <span className="paper-tb-src">arxiv.org / {id}</span>}
+
+  // PDF.js document object
+  const [pdf, setPdf] = useState(null);
+  const [numPages, setNumPages] = useState(0);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [zoom, setZoom] = useState(1.2);
+  // "idle" | "loading" | "ready" | "error"
+  const [loadState, setLoadState] = useState("idle");
+
+  const canvasRef = useRef(null);
+  // Track the in-flight render task so we can cancel it if page/zoom changes
+  const renderTaskRef = useRef(null);
+  // Track loading task so we can cancel on arxivId change
+  const loadingTaskRef = useRef(null);
+
+  // ── Load PDF when arxivId changes ──────────────────────────────────────────
+  useEffect(() => {
+    if (!id) {
+      setPdf(null);
+      setLoadState("idle");
+      return;
+    }
+    if (!window.pdfjsLib) {
+      setLoadState("error");
+      return;
+    }
+
+    // Cancel any in-flight load
+    if (loadingTaskRef.current) {
+      loadingTaskRef.current.destroy();
+      loadingTaskRef.current = null;
+    }
+
+    setLoadState("loading");
+    setPdf(null);
+    setCurrentPage(1);
+    setNumPages(0);
+
+    const vaultPath = VAULT_PATH || "";
+    const url = `/paper/${encodeURIComponent(id)}.pdf${vaultPath ? "?vault_path=" + encodeURIComponent(vaultPath) : ""}`;
+    const task = window.pdfjsLib.getDocument(url);
+    loadingTaskRef.current = task;
+
+    task.promise.then(
+      (doc) => {
+        loadingTaskRef.current = null;
+        setPdf(doc);
+        setNumPages(doc.numPages);
+        setLoadState("ready");
+      },
+      (err) => {
+        loadingTaskRef.current = null;
+        if (err && err.name === "AbortException") return; // cancelled
+        setLoadState("error");
+      }
+    );
+
+    return () => {
+      if (loadingTaskRef.current) {
+        loadingTaskRef.current.destroy();
+        loadingTaskRef.current = null;
+      }
+    };
+  }, [id]);
+
+  // ── Handle external jump-to-page ──────────────────────────────────────────
+  useEffect(() => {
+    if (jumpToPage !== null && jumpToPage !== undefined && numPages > 0) {
+      const clamped = Math.max(1, Math.min(numPages, jumpToPage));
+      setCurrentPage(clamped);
+    }
+  }, [jumpToPage, numPages]);
+
+  // ── Render current page onto canvas ───────────────────────────────────────
+  useEffect(() => {
+    if (!pdf || loadState !== "ready" || !canvasRef.current) return;
+
+    // Cancel previous render
+    if (renderTaskRef.current) {
+      renderTaskRef.current.cancel();
+      renderTaskRef.current = null;
+    }
+
+    pdf.getPage(currentPage).then((page) => {
+      const viewport = page.getViewport({ scale: zoom });
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const ctx = canvas.getContext("2d");
+      canvas.width = viewport.width;
+      canvas.height = viewport.height;
+
+      const renderTask = page.render({ canvasContext: ctx, viewport });
+      renderTaskRef.current = renderTask;
+      renderTask.promise.then(
+        () => { renderTaskRef.current = null; },
+        (err) => {
+          renderTaskRef.current = null;
+          if (err && err.name !== "RenderingCancelledException") {
+            // eslint-disable-next-line no-console
+            console.warn("PDF render error:", err);
+          }
+        }
+      );
+    });
+  }, [pdf, currentPage, zoom, loadState]);
+
+  // ── Toolbar actions ───────────────────────────────────────────────────────
+  const prevPage = () => setCurrentPage(p => Math.max(1, p - 1));
+  const nextPage = () => setCurrentPage(p => Math.min(numPages, p + 1));
+  const zoomOut = () => setZoom(z => Math.max(0.4, parseFloat((z - 0.2).toFixed(1))));
+  const zoomIn  = () => setZoom(z => Math.min(4.0, parseFloat((z + 0.2).toFixed(1))));
+
+  const onPageInput = (e) => {
+    const n = parseInt(e.target.value, 10);
+    if (!isNaN(n)) setCurrentPage(Math.max(1, Math.min(numPages, n)));
+  };
+
+  // ── Render ────────────────────────────────────────────────────────────────
+  if (!id) {
+    return (
+      <div className="paper-wrap">
+        <div className="paper-scroll" style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: 320 }}>
+          <p style={{ color: "var(--ink-3)", fontFamily: "var(--serif)" }}>打开一篇文章后再查看 PDF。</p>
         </div>
       </div>
-      <div className="paper-scroll" style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: 320 }}>
-        <div style={{ textAlign: "center", padding: 40, color: "var(--ink-3)" }}>
-          <div style={{ fontSize: 32, marginBottom: 12 }}>📄</div>
-          <p style={{ fontFamily: "var(--serif)", fontSize: 15, marginBottom: 12 }}>
-            PDF 视图正在 Phase 2 中,先看 arXiv 原文 ↗
-          </p>
-          {id && (
-            <a
-              href={`https://arxiv.org/abs/${id}`}
-              target="_blank"
-              rel="noreferrer"
-              style={{ color: "var(--accent)", fontFamily: "var(--mono)", fontSize: 13 }}
-            >
-              arxiv.org/abs/{id}
-            </a>
-          )}
+    );
+  }
+
+  return (
+    <div className="paper-wrap">
+      {/* Toolbar */}
+      <div className="paper-toolbar">
+        <div className="paper-tb-left">
+          <button className="paper-tb-btn" onClick={prevPage} disabled={currentPage <= 1 || loadState !== "ready"} title="上一页">‹</button>
+          <span className="paper-pageinfo">
+            {loadState === "ready"
+              ? (<>
+                  <input
+                    type="number"
+                    min={1}
+                    max={numPages}
+                    value={currentPage}
+                    onChange={onPageInput}
+                    style={{ width: 44, textAlign: "center", fontFamily: "var(--mono)", fontSize: 12, border: "1px solid var(--border)", borderRadius: 3, padding: "1px 2px" }}
+                  />
+                  {" "}<span style={{ color: "var(--ink-3)" }}>/ {numPages}</span>
+                </>)
+              : <i style={{ color: "var(--ink-3)", fontSize: 12 }}>{loadState === "loading" ? "加载中…" : loadState === "error" ? "加载失败" : "—"}</i>
+            }
+          </span>
+          <button className="paper-tb-btn" onClick={nextPage} disabled={currentPage >= numPages || loadState !== "ready"} title="下一页">›</button>
+          <span style={{ width: 8 }} />
+          <button className="paper-tb-btn" onClick={zoomOut} title="缩小">−</button>
+          <span className="paper-pageinfo" style={{ minWidth: 40, textAlign: "center", fontFamily: "var(--mono)", fontSize: 12 }}>{Math.round(zoom * 100)}%</span>
+          <button className="paper-tb-btn" onClick={zoomIn} title="放大">+</button>
         </div>
+        <div className="paper-tb-right">
+          <a
+            href={`https://arxiv.org/abs/${id}`}
+            target="_blank"
+            rel="noreferrer"
+            className="paper-tb-src"
+            title="在 arXiv 上打开"
+          >↗ arxiv.org/abs/{id}</a>
+        </div>
+      </div>
+
+      {/* Canvas area */}
+      <div className="paper-scroll" style={{ overflow: "auto", flex: 1 }}>
+        {loadState === "loading" && (
+          <div style={{ padding: 40, textAlign: "center", color: "var(--ink-3)", fontFamily: "var(--serif)" }}>PDF 加载中…</div>
+        )}
+        {loadState === "error" && (
+          <div style={{ padding: 40, textAlign: "center" }}>
+            <p style={{ color: "var(--accent)", fontFamily: "var(--serif)", marginBottom: 12 }}>PDF 加载失败</p>
+            <a href={`https://arxiv.org/abs/${id}`} target="_blank" rel="noreferrer" style={{ color: "var(--accent)", fontFamily: "var(--mono)", fontSize: 13 }}>
+              arxiv.org/abs/{id} ↗
+            </a>
+          </div>
+        )}
+        {loadState === "ready" && (
+          <div style={{ display: "flex", justifyContent: "center", padding: "16px 0" }}>
+            <canvas ref={canvasRef} style={{ boxShadow: "0 2px 12px rgba(0,0,0,0.18)", borderRadius: 2 }} />
+          </div>
+        )}
+        {/* Mount canvas in DOM even during loading so ref is stable */}
+        {loadState === "loading" && <canvas ref={canvasRef} style={{ display: "none" }} />}
       </div>
     </div>
   );
@@ -849,6 +1049,7 @@ function App() {
   const [currentArxivId, setCurrentArxivId] = useState(null);
   const [hasDashboard, setHasDashboard] = useState(false);
   const [articleFlash, setArticleFlash] = useState(null);
+  const [paperJump, setPaperJump] = useState(null);  // number | null — page to jump to in PaperView
   const [history, setHistory] = useState([]);  // conversation history (stateless: sent with each turn)
   const [dark, setDark] = useState(() => localStorage.getItem("pd-theme") === "dark");
   const feedRef = useRef(null);
@@ -878,6 +1079,12 @@ function App() {
   const openGraph = (arxivId) => {
     if (arxivId) setCurrentArxivId(arxivId);
     setTab("graph");
+  };
+
+  // Jump to a specific PDF page and switch to the Paper tab
+  const jumpToPaperPage = (n) => {
+    setPaperJump(n);
+    setTab("paper");
   };
 
   // Pick a paper from search results — synthesize a chat message to distill it
@@ -1063,7 +1270,7 @@ function App() {
             {tab === "welcome" && (
               <WelcomeView
                 onPick={() => openArticleOpen && setTab("article")}
-                onOpenArticle={(slug, cat) => openArticle(slug, cat)}
+                onOpenArticle={(slug, cat, arxivId) => openArticle(slug, cat, arxivId)}
               />
             )}
             {tab === "article" && (
@@ -1073,6 +1280,8 @@ function App() {
                 articleFlash={articleFlash}
                 onOpenGraph={(arxivId) => openGraph(arxivId)}
                 onOpenPaper={() => setTab("paper")}
+                jumpToPaperPage={jumpToPaperPage}
+                onArticleLoaded={a => a && a.arxiv_id && setCurrentArxivId(a.arxiv_id)}
               />
             )}
             {tab === "graph" && (
@@ -1082,7 +1291,7 @@ function App() {
               />
             )}
             {tab === "paper" && (
-              <PaperView arxivId={currentArxivId} />
+              <PaperView arxivId={currentArxivId} jumpToPage={paperJump} />
             )}
             {tab === "dashboard" && hasDashboard && <DashboardView />}
           </div>
